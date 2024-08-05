@@ -7,11 +7,16 @@
 
 void error(FileContext context, char *format, ...)
 {
-    printf("<%s:%d:%d>: error: ", context.filename, context.row, context.col);
     va_list args;
     va_start(args, format);
-    printf(format, args);
+    verror(context, format, args);
     va_end(args);
+}
+
+void verror(FileContext context, char *format, va_list args)
+{
+    printf("<%s:%d:%d>: error: ", context.filename, context.row, context.col);
+    vprintf(format, args);
     printf("\n");
     longjmp(env, 1);
 }

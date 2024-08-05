@@ -5,10 +5,15 @@
 
 void warning(FileContext context, char *format, ...)
 {
-    printf("<%s:%d:%d>: warning: ", context.filename, context.row, context.col);
     va_list args;
     va_start(args, format);
-    printf(format, args);
+    vwarning(context, format, args);
     va_end(args);
+}
+
+void vwarning(FileContext context, char *format, va_list args)
+{
+    printf("<%s:%d:%d>: warning: ", context.filename, context.row, context.col);
+    vprintf(format, args);
     printf("\n");
 }
