@@ -14,7 +14,7 @@ void ast_init(AST *self, ASTKind kind, ASTContext context)
     self->sibling = NULL;
     self->head_sibling = self;
     self->val = "\0";
-    self->flags = 0;
+    self->flag = 0;
     self->type = NULL;
 }
 
@@ -38,7 +38,7 @@ void ast_print(AST *self, int indent)
         {
         case AK_RECORDDECL:
         case AK_RECORDSPECIFIER:
-            if (CHECK_FLAG(p->flags, AF_STRUCT))
+            if (CHECK_FLAG(p->flag, AF_STRUCT))
                 printf("struct ");
             else
                 printf("union ");
@@ -85,7 +85,7 @@ char *ast_tostr(AST *self)
         break;
     case AK_MEMBER:
         s = add_string(s, ast_tostr(self->member_target));
-        if (CHECK_FLAG(self->flags, AF_ARROW))
+        if (CHECK_FLAG(self->flag, AF_ARROW))
             s = add_string(s, "->");
         else
             s = add_char(s, '.');

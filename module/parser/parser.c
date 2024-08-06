@@ -184,7 +184,7 @@ AST *parser_postfix_expression(Parser *self)
             NEWAST(t, AK_MEMBER, ast->context);
             t->member_target = ast;
             t->val = TOKEN->str;
-            if (TOKEN->type == TK_ARROW) ADD_FLAG(t->flags, AF_ARROW);
+            if (TOKEN->type == TK_ARROW) ADD_FLAG(t->flag, AF_ARROW);
 
             MATCH(TK_NAME);
         }
@@ -195,7 +195,7 @@ AST *parser_postfix_expression(Parser *self)
             NEWAST(t, AK_UNARYOPERATOR, ast->context);
             t->unaryop_operand = ast;
             t->val = "++";
-            ADD_FLAG(t->flags, AF_POSTFIX);
+            ADD_FLAG(t->flag, AF_POSTFIX);
         }
         else if (TOKEN->type == TK_MINUSMINUS)
         {
@@ -204,7 +204,7 @@ AST *parser_postfix_expression(Parser *self)
             NEWAST(t, AK_UNARYOPERATOR, ast->context);
             t->unaryop_operand = ast;
             t->val = "--";
-            ADD_FLAG(t->flags, AF_POSTFIX);
+            ADD_FLAG(t->flag, AF_POSTFIX);
         }
         UPDATECONTEXT(t->context);
         ast = t;
@@ -255,7 +255,7 @@ AST *parser_unary_expression(Parser *self)
     {
         NEWAST(ast, AK_UNARYOPERATOR, context);
         ast->val = TOKEN->str;
-        ADD_FLAG(ast->flags, AF_PREFIX);
+        ADD_FLAG(ast->flag, AF_PREFIX);
         MATCH(TOKEN->type);
         REQUIRED(ast->unaryop_operand, parser_unary_expression(self));
         REQUIRED(ast->unaryop_operand, parser_unary_expression(self));
@@ -866,13 +866,13 @@ AST *parser_struct_or_union_specifer(Parser *self)
     if (TOKEN->type == TK_STRUCT)
     {
         NEWAST(ast, AK_RECORDSPECIFIER, context);
-        ADD_FLAG(ast->flags, AF_STRUCT);
+        ADD_FLAG(ast->flag, AF_STRUCT);
         MATCH(TK_STRUCT);
     }
     else if (TOKEN->type == TK_UNION)
     {
         NEWAST(ast, AK_RECORDSPECIFIER, context);
-        ADD_FLAG(ast->flags, AF_UNION);
+        ADD_FLAG(ast->flag, AF_UNION);
         MATCH(TK_UNION);
     }
     if (TOKEN->type == TK_NAME)

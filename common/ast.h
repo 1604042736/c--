@@ -99,7 +99,7 @@ typedef struct AST {
     struct AST *sibling;                  // 右兄弟节点
     struct AST *head_sibling;             // 最左兄弟节点
     char *val;
-    int flags;
+    int flag;
     Type *type;
 } AST;
 

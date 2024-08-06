@@ -291,7 +291,7 @@ void declanalyzer_analyze(DeclAnalyzer *self, AST *ast)
     case AK_RECORDSPECIFIER:
         p = ast_new();
         ast_init(p, AK_RECORDDECL, ast->context);
-        p->flags = ast->flags;
+        p->flag = ast->flag;
         ast->recordspec_decl = p;
 
         t = ast->recordspec_list;
@@ -323,7 +323,7 @@ void declanalyzer_analyze(DeclAnalyzer *self, AST *ast)
         }
 
         self->type = type_new();
-        if (CHECK_FLAG(ast->flags, AF_STRUCT))
+        if (CHECK_FLAG(ast->flag, AF_STRUCT))
             type_init(self->type, T_STRUCT);
         else
             type_init(self->type, T_UNION);
