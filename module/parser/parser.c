@@ -1,5 +1,6 @@
 #include <stdarg.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "error.h"
 #include "parser.h"
@@ -10,6 +11,7 @@ Parser *parser_new() { return (Parser *)malloc(sizeof(Parser)); }
 void parser_init(Parser *self, Lexer *lexer)
 {
     self->lexer = lexer;
+    self->error_num = 0;
     lexer_gettoken(lexer);
 }
 
@@ -40,11 +42,11 @@ int parser_match(Parser *self, TokenType actual, TokenType expected)
 
 #define TOKEN self->lexer->token
 
-#define NEWAST(ast, type, context)                                             \
+#define NEWAST(ast, kind, context)                                             \
     do                                                                         \
     {                                                                          \
         ast = ast_new();                                                       \
-        ast_init(ast, type, context);                                          \
+        ast_init(ast, kind, context);                                          \
     } while (0)
 
 #define MATCH(expected)                                                        \
@@ -52,12 +54,20 @@ int parser_match(Parser *self, TokenType actual, TokenType expected)
     {                                                                          \
         if (!parser_match(self, TOKEN->type, expected))                        \
         {                                                                      \
+            char buf[100];                                                     \
+            sprintf(buf, "[%s]Expected '%s', but got '%s'", __func__,          \
+                    token_names[expected], token_names[TOKEN->type]);          \
+            self->errors[self->error_num].msg = malloc(strlen(buf) + 1);       \
+            strcpy(self->errors[self->error_num].msg, buf);                    \
+            self->errors[self->error_num].msg[strlen(buf)] = '\0';             \
+            self->errors[self->error_num].context = TOKEN->context;            \
+            self->error_num++;                                                 \
             LOAD(tk);                                                          \
             return NULL;                                                       \
         }                                                                      \
     } while (0)
 
-#define NONTERMINAL(t, f)                                                      \
+#define REQUIRED(t, f)                                                         \
     do                                                                         \
     {                                                                          \
         t = f;                                                                 \
@@ -68,8 +78,14 @@ int parser_match(Parser *self, TokenType actual, TokenType expected)
         }                                                                      \
     } while (0)
 
-#define STORE(tk) Token *tk = TOKEN
-#define LOAD(tk) TOKEN = tk
+#define STORE(tk)                                                              \
+    Token *tk = TOKEN;                                                         \
+    int _##tk = self->error_num
+#define LOAD(tk)                                                               \
+    do                                                                         \
+    {                                                                          \
+        TOKEN = tk;                                                            \
+    } while (0)
 
 /*
 primary_expression:
@@ -86,28 +102,33 @@ AST *parser_primary_expression(Parser *self)
     switch (TOKEN->type)
     {
     case TK_NAME:
-        NEWAST(ast, AT_NAME, context);
+        NEWAST(ast, AK_NAME, context);
         ast->val = TOKEN->str;
         MATCH(TK_NAME);
         break;
     case TK_INTCONST:
-        NEWAST(ast, AT_INTEGER, context);
+        NEWAST(ast, AK_INTEGER, context);
         ast->val = TOKEN->str;
         MATCH(TK_INTCONST);
         break;
     case TK_FLOATCONST:
-        NEWAST(ast, AT_FLOAT, context);
+        NEWAST(ast, AK_FLOAT, context);
         ast->val = TOKEN->str;
         MATCH(TK_FLOATCONST);
         break;
     case TK_STRINGCONST:
-        NEWAST(ast, AT_STRING, context);
+        NEWAST(ast, AK_STRING, context);
         ast->val = TOKEN->str;
         MATCH(TK_STRINGCONST);
         break;
+    case TK_CHARCONST:
+        NEWAST(ast, AK_CHAR, context);
+        ast->val = TOKEN->str;
+        MATCH(TK_CHARCONST);
+        break;
     case TK_LPAREN:
         MATCH(TK_LPAREN);
-        NONTERMINAL(ast, parser_expression(self));
+        REQUIRED(ast, parser_expression(self));
         MATCH(TK_RPAREN);
         break;
     }
@@ -129,7 +150,7 @@ AST *parser_postfix_expression(Parser *self)
     NEWCONTEXT(context);
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_primary_expression(self));
+    REQUIRED(ast, parser_primary_expression(self));
     while (TOKEN->type == TK_LSQUARE || TOKEN->type == TK_LPAREN
            || TOKEN->type == TK_PERIOD || TOKEN->type == TK_ARROW
            || TOKEN->type == TK_PLUSPLUS || TOKEN->type == TK_MINUSMINUS)
@@ -139,9 +160,9 @@ AST *parser_postfix_expression(Parser *self)
         {
             MATCH(TK_LSQUARE);
 
-            NEWAST(t, AT_SUBSCRIPT, ast->context);
+            NEWAST(t, AK_SUBSCRIPT, ast->context);
             t->subscript_target = ast;
-            NONTERMINAL(t->subscript_index, parser_expression(self));
+            REQUIRED(t->subscript_index, parser_expression(self));
 
             MATCH(TK_RSQUARE);
         }
@@ -149,11 +170,10 @@ AST *parser_postfix_expression(Parser *self)
         {
             MATCH(TK_LPAREN);
 
-            NEWAST(t, AT_CALL, ast->context);
+            NEWAST(t, AK_CALL, ast->context);
             t->call_func = ast;
             if (TOKEN->type != TK_RPAREN)
-                NONTERMINAL(t->call_args,
-                            parser_argument_expression_list(self));
+                REQUIRED(t->call_args, parser_argument_expression_list(self));
 
             MATCH(TK_RPAREN);
         }
@@ -161,10 +181,10 @@ AST *parser_postfix_expression(Parser *self)
         {
             MATCH(TOKEN->type);
 
-            NEWAST(t, AT_MEMBER, ast->context);
+            NEWAST(t, AK_MEMBER, ast->context);
             t->member_target = ast;
             t->val = TOKEN->str;
-            if (TOKEN->type == TK_ARROW) t->flags |= FLAG_ARROW;
+            if (TOKEN->type == TK_ARROW) ADD_FLAG(t->flags, AF_ARROW);
 
             MATCH(TK_NAME);
         }
@@ -172,19 +192,19 @@ AST *parser_postfix_expression(Parser *self)
         {
             MATCH(TK_PLUSPLUS);
 
-            NEWAST(t, AT_UNARYOPERATOR, ast->context);
+            NEWAST(t, AK_UNARYOPERATOR, ast->context);
             t->unaryop_operand = ast;
             t->val = "++";
-            t->flags |= FLAG_POSTFIX;
+            ADD_FLAG(t->flags, AF_POSTFIX);
         }
         else if (TOKEN->type == TK_MINUSMINUS)
         {
             MATCH(TK_MINUSMINUS);
 
-            NEWAST(t, AT_UNARYOPERATOR, ast->context);
+            NEWAST(t, AK_UNARYOPERATOR, ast->context);
             t->unaryop_operand = ast;
             t->val = "--";
-            t->flags |= FLAG_POSTFIX;
+            ADD_FLAG(t->flags, AF_POSTFIX);
         }
         UPDATECONTEXT(t->context);
         ast = t;
@@ -202,12 +222,12 @@ AST *parser_argument_expression_list(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_assignment_expression(self));
+    REQUIRED(ast, parser_assignment_expression(self));
     AST *p = ast;
     while (TOKEN->type == TK_COMMA)
     {
         MATCH(TK_COMMA);
-        NONTERMINAL(p->sibling, parser_assignment_expression(self));
+        REQUIRED(p->sibling, parser_assignment_expression(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -233,38 +253,45 @@ AST *parser_unary_expression(Parser *self)
     NEWCONTEXT(context);
     if (TOKEN->type == TK_PLUSPLUS || TOKEN->type == TK_MINUSMINUS)
     {
-        NEWAST(ast, AT_UNARYOPERATOR, context);
+        NEWAST(ast, AK_UNARYOPERATOR, context);
         ast->val = TOKEN->str;
-        ast->flags |= FLAG_PREFIX;
+        ADD_FLAG(ast->flags, AF_PREFIX);
         MATCH(TOKEN->type);
-        NONTERMINAL(ast->unaryop_operand, parser_unary_expression(self));
-        NONTERMINAL(ast->unaryop_operand, parser_unary_expression(self));
+        REQUIRED(ast->unaryop_operand, parser_unary_expression(self));
+        REQUIRED(ast->unaryop_operand, parser_unary_expression(self));
     }
     else if (TOKEN->type == TK_SIZEOF)
     {
-        NEWAST(ast, AT_UNARYOPERATOR, context);
+        NEWAST(ast, AK_UNARYOPERATOR, context);
         ast->val = "sizeof";
         MATCH(TK_SIZEOF);
+        STORE(tk2);
         if (TOKEN->type == TK_LPAREN)
         {
-            MATCH(TK_LPAREN);
-            NONTERMINAL(ast->unaryop_operand, parser_type_name(self));
-            MATCH(TK_RPAREN);
+            ast->unaryop_operand = parser_unary_expression(self);
+            if (ast->unaryop_operand == NULL)
+            {
+                LOAD(tk2);
+                MATCH(TK_LPAREN);
+                REQUIRED(ast->unaryop_operand, parser_type_name(self));
+                self->error_num = _tk2;
+                MATCH(TK_RPAREN);
+            }
         }
         else
-            NONTERMINAL(ast->unaryop_operand, parser_unary_expression(self));
+            REQUIRED(ast->unaryop_operand, parser_unary_expression(self));
     }
     else if (TOKEN->type == TK_AMP || TOKEN->type == TK_STAR
              || TOKEN->type == TK_PLUS || TOKEN->type == TK_MINUS
              || TOKEN->type == TK_TILDE || TOKEN->type == TK_EXCLAIM)
     {
-        NEWAST(ast, AT_UNARYOPERATOR, context);
+        NEWAST(ast, AK_UNARYOPERATOR, context);
         ast->val = TOKEN->str;
         MATCH(TOKEN->type);
-        NONTERMINAL(ast->unaryop_operand, parser_cast_expression(self));
+        REQUIRED(ast->unaryop_operand, parser_cast_expression(self));
     }
     else
-        NONTERMINAL(ast, parser_postfix_expression(self));
+        REQUIRED(ast, parser_postfix_expression(self));
     UPDATECONTEXT(ast->context);
     return ast;
 }
@@ -281,17 +308,25 @@ AST *parser_cast_expression(Parser *self)
     if (TOKEN->type == TK_LPAREN)
     {
         NEWCONTEXT(context);
-        NEWAST(ast, AT_CAST, context);
+        NEWAST(ast, AK_CAST, context);
 
         MATCH(TK_LPAREN);
-        NONTERMINAL(ast->cast_type, parser_type_name(self));
-        MATCH(TK_RPAREN);
-        NONTERMINAL(ast->cast_target, parser_cast_expression(self));
-
-        UPDATECONTEXT(ast->context);
+        ast->cast_type = parser_type_name(self);
+        if (ast->cast_type == NULL)
+        {
+            LOAD(tk);
+            REQUIRED(ast, parser_unary_expression(self));
+            self->error_num = _tk;
+        }
+        else
+        {
+            MATCH(TK_RPAREN);
+            REQUIRED(ast->cast_target, parser_cast_expression(self));
+            UPDATECONTEXT(ast->context);
+        }
     }
     else
-        NONTERMINAL(ast, parser_unary_expression(self));
+        REQUIRED(ast, parser_unary_expression(self));
     return ast;
 }
 
@@ -306,16 +341,16 @@ AST *parser_multiplicative_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_cast_expression(self));
+    REQUIRED(ast, parser_cast_expression(self));
     while (TOKEN->type == TK_STAR || TOKEN->type == TK_SLASH
            || TOKEN->type == TK_PERCENT)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_cast_expression(self));
+        REQUIRED(t->binop_right, parser_cast_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -332,15 +367,15 @@ AST *parser_addtive_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_multiplicative_expression(self));
+    REQUIRED(ast, parser_multiplicative_expression(self));
     while (TOKEN->type == TK_PLUS || TOKEN->type == TK_MINUS)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_multiplicative_expression(self));
+        REQUIRED(t->binop_right, parser_multiplicative_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -357,15 +392,15 @@ AST *parser_shift_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_addtive_expression(self));
+    REQUIRED(ast, parser_addtive_expression(self));
     while (TOKEN->type == TK_GREATERGREATER || TOKEN->type == TK_LESSLESS)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_addtive_expression(self));
+        REQUIRED(t->binop_right, parser_addtive_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -384,16 +419,16 @@ AST *parser_relational_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_shift_expression(self));
+    REQUIRED(ast, parser_shift_expression(self));
     while (TOKEN->type == TK_GREATER || TOKEN->type == TK_GREATEREQUAL
            || TOKEN->type == TK_LESS || TOKEN->type == TK_LESSEQUAL)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_shift_expression(self));
+        REQUIRED(t->binop_right, parser_shift_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -410,15 +445,15 @@ AST *parser_equality_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_relational_expression(self));
+    REQUIRED(ast, parser_relational_expression(self));
     while (TOKEN->type == TK_EQUALEQUAL || TOKEN->type == TK_EXCLAIMEQUAL)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_relational_expression(self));
+        REQUIRED(t->binop_right, parser_relational_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -434,15 +469,15 @@ AST *parser_and_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_equality_expression(self));
+    REQUIRED(ast, parser_equality_expression(self));
     while (TOKEN->type == TK_AMP)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_equality_expression(self));
+        REQUIRED(t->binop_right, parser_equality_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -458,15 +493,15 @@ AST *parser_exclusive_or_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_and_expression(self));
+    REQUIRED(ast, parser_and_expression(self));
     while (TOKEN->type == TK_CARET)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_and_expression(self));
+        REQUIRED(t->binop_right, parser_and_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -482,15 +517,15 @@ AST *parser_inclusive_or_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_exclusive_or_expression(self));
+    REQUIRED(ast, parser_exclusive_or_expression(self));
     while (TOKEN->type == TK_PIPE)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_exclusive_or_expression(self));
+        REQUIRED(t->binop_right, parser_exclusive_or_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -506,15 +541,15 @@ AST *parser_logical_and_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_inclusive_or_expression(self));
+    REQUIRED(ast, parser_inclusive_or_expression(self));
     while (TOKEN->type == TK_AMPAMP)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_inclusive_or_expression(self));
+        REQUIRED(t->binop_right, parser_inclusive_or_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -530,15 +565,15 @@ AST *parser_logical_or_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_logical_and_expression(self));
+    REQUIRED(ast, parser_logical_and_expression(self));
     while (TOKEN->type == TK_PIPEPIPE)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_logical_and_expression(self));
+        REQUIRED(t->binop_right, parser_logical_and_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -554,16 +589,16 @@ AST *parser_conditional_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_logical_or_expression(self));
+    REQUIRED(ast, parser_logical_or_expression(self));
     if (TOKEN->type == TK_QUESTION)
     {
         AST *t;
-        NEWAST(t, AT_CONDITIONALOPERATOR, ast->context);
+        NEWAST(t, AK_CONDITIONALOPERATOR, ast->context);
         t->condop_cond = ast;
         MATCH(TK_QUESTION);
-        NONTERMINAL(t->condop_true, parser_expression(self));
+        REQUIRED(t->condop_true, parser_expression(self));
         MATCH(TK_COLON);
-        NONTERMINAL(t->condop_false, parser_conditional_expression(self));
+        REQUIRED(t->condop_false, parser_conditional_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -582,7 +617,7 @@ AST *parser_assignment_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_conditional_expression(self));
+    REQUIRED(ast, parser_conditional_expression(self));
     if (TOKEN->type == TK_EQUAL || TOKEN->type == TK_STAREQUAL
         || TOKEN->type == TK_SLASHEQUAL || TOKEN->type == TK_PERCENTEQUAL
         || TOKEN->type == TK_PLUSEQUAL || TOKEN->type == TK_MINUSEQUAL
@@ -591,11 +626,11 @@ AST *parser_assignment_expression(Parser *self)
         || TOKEN->type == TK_CARETEQUAL || TOKEN->type == TK_PIPEEQUAL)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_assignment_expression(self));
+        REQUIRED(t->binop_right, parser_assignment_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -611,15 +646,15 @@ AST *parser_expression(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_assignment_expression(self));
+    REQUIRED(ast, parser_assignment_expression(self));
     while (TOKEN->type == TK_COMMA)
     {
         AST *t;
-        NEWAST(t, AT_BINARYOPERATOR, ast->context);
+        NEWAST(t, AK_BINARYOPERATOR, ast->context);
         t->val = TOKEN->str;
         t->binop_left = ast;
         MATCH(TOKEN->type);
-        NONTERMINAL(t->binop_right, parser_assignment_expression(self));
+        REQUIRED(t->binop_right, parser_assignment_expression(self));
         UPDATECONTEXT(t->context);
         ast = t;
     }
@@ -644,10 +679,10 @@ AST *parser_declaration(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_DECLSTMT, context);
-    NONTERMINAL(ast->decl_spec, parser_declaration_specifier(self));
+    NEWAST(ast, AK_DECLSTMT, context);
+    REQUIRED(ast->decl_spec, parser_declaration_specifier(self));
     if (TOKEN->type != TK_SEMI)
-        NONTERMINAL(ast->decl_declor, parser_init_declaratior_list(self));
+        REQUIRED(ast->decl_declor, parser_init_declaratior_list(self));
     UPDATECONTEXT(ast->context);
     MATCH(TK_SEMI);
     return ast;
@@ -670,21 +705,21 @@ AST *parser_declaration_specifier(Parser *self)
     int type_specifer_matched = 0;
     int combinable = 0;
     if (parser_is_storage_class_specifier(self))
-        NONTERMINAL(ast, parser_storage_class_specifier(self));
+        REQUIRED(ast, parser_storage_class_specifier(self));
     else if (parser_is_type_specifer(self))
     {
         type_specifer_matched = 1;
         combinable = TOKEN->type != TK_NAME; // typdef_name组合无意义
-        NONTERMINAL(ast, parser_type_specifer(self));
+        REQUIRED(ast, parser_type_specifer(self));
     }
     else if (parser_is_type_qualifier(self))
-        NONTERMINAL(ast, parser_type_qualifier(self));
+        REQUIRED(ast, parser_type_qualifier(self));
     AST *p = ast;
     while (parser_is_storage_class_specifier(self)
            || parser_is_type_specifer(self) || parser_is_type_qualifier(self))
     {
         if (parser_is_storage_class_specifier(self))
-            NONTERMINAL(p->sibling, parser_storage_class_specifier(self));
+            REQUIRED(p->sibling, parser_storage_class_specifier(self));
         else if (parser_is_type_specifer(self))
         {
             if (type_specifer_matched && !combinable) break;
@@ -693,10 +728,10 @@ AST *parser_declaration_specifier(Parser *self)
                 break;
             type_specifer_matched = 1;
             combinable = TOKEN->type != TK_NAME;
-            NONTERMINAL(p->sibling, parser_type_specifer(self));
+            REQUIRED(p->sibling, parser_type_specifer(self));
         }
         else if (parser_is_type_qualifier(self))
-            NONTERMINAL(p->sibling, parser_type_qualifier(self));
+            REQUIRED(p->sibling, parser_type_qualifier(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -711,12 +746,12 @@ AST *parser_init_declaratior_list(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_init_declarator(self));
+    REQUIRED(ast, parser_init_declarator(self));
     AST *p = ast;
     while (TOKEN->type == TK_COMMA)
     {
         MATCH(TK_COMMA);
-        NONTERMINAL(p->sibling, parser_init_declarator(self));
+        REQUIRED(p->sibling, parser_init_declarator(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -732,12 +767,12 @@ AST *parser_init_declarator(Parser *self)
     NEWCONTEXT(context);
     STORE(tk);
     AST *ast;
-    NEWAST(ast, AT_INITDECLARATOR, context);
-    NONTERMINAL(ast->initdecl_decl, parser_declarator(self));
+    NEWAST(ast, AK_INITDECLARATOR, context);
+    REQUIRED(ast->initdecl_decl, parser_declarator(self));
     if (TOKEN->type == TK_EQUAL)
     {
         MATCH(TK_EQUAL);
-        NONTERMINAL(ast->initdecl_init, parser_initializer(self));
+        REQUIRED(ast->initdecl_init, parser_initializer(self));
     }
     UPDATECONTEXT(context);
     return ast;
@@ -756,7 +791,7 @@ AST *parser_storage_class_specifier(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_STORAGECLASSSPECIFIER, context);
+    NEWAST(ast, AK_STORAGECLASSSPECIFIER, context);
     ast->val = TOKEN->str;
     MATCH(TOKEN->type);
     return ast;
@@ -792,12 +827,12 @@ AST *parser_type_specifer(Parser *self)
     NEWCONTEXT(context);
     AST *ast = NULL;
     if (TOKEN->type == TK_STRUCT || TOKEN->type == TK_UNION)
-        NONTERMINAL(ast, parser_struct_or_union_specifer(self));
+        REQUIRED(ast, parser_struct_or_union_specifer(self));
     else if (TOKEN->type == TK_ENUM)
-        NONTERMINAL(ast, parser_enum_specifier(self));
+        REQUIRED(ast, parser_enum_specifier(self));
     else
     {
-        NEWAST(ast, AT_TYPESPECIFER, context);
+        NEWAST(ast, AK_TYPESPECIFER, context);
         ast->val = TOKEN->str;
         MATCH(TOKEN->type);
     }
@@ -830,12 +865,14 @@ AST *parser_struct_or_union_specifer(Parser *self)
     AST *ast = NULL;
     if (TOKEN->type == TK_STRUCT)
     {
-        NEWAST(ast, AT_STRUCTSPECIFIER, context);
+        NEWAST(ast, AK_RECORDSPECIFIER, context);
+        ADD_FLAG(ast->flags, AF_STRUCT);
         MATCH(TK_STRUCT);
     }
     else if (TOKEN->type == TK_UNION)
     {
-        NEWAST(ast, AT_UNIONSPECIFIER, context);
+        NEWAST(ast, AK_RECORDSPECIFIER, context);
+        ADD_FLAG(ast->flags, AF_UNION);
         MATCH(TK_UNION);
     }
     if (TOKEN->type == TK_NAME)
@@ -846,7 +883,7 @@ AST *parser_struct_or_union_specifer(Parser *self)
     if (TOKEN->type == TK_LBRACE)
     {
         MATCH(TK_LBRACE);
-        NONTERMINAL(ast->souspec_list, parser_struct_declaration_list(self));
+        REQUIRED(ast->recordspec_list, parser_struct_declaration_list(self));
         MATCH(TK_RBRACE);
     }
     UPDATECONTEXT(ast->context);
@@ -862,11 +899,11 @@ AST *parser_struct_declaration_list(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_struct_declaration(self));
+    REQUIRED(ast, parser_struct_declaration(self));
     AST *p = ast;
     while (TOKEN->type != TK_RBRACE)
     {
-        NONTERMINAL(p->sibling, parser_struct_declaration(self));
+        REQUIRED(p->sibling, parser_struct_declaration(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -882,9 +919,9 @@ AST *parser_struct_declaration(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_FIELDDECLARATION, context);
-    NONTERMINAL(ast->decl_spec, parser_specifier_qualifier_list(self));
-    NONTERMINAL(ast->decl_declor, parser_struct_declarator_list(self));
+    NEWAST(ast, AK_FIELDDECLARATION, context);
+    REQUIRED(ast->decl_spec, parser_specifier_qualifier_list(self));
+    REQUIRED(ast->decl_declor, parser_struct_declarator_list(self));
     UPDATECONTEXT(ast->context);
     MATCH(TK_SEMI);
     return ast;
@@ -905,10 +942,10 @@ AST *parser_specifier_qualifier_list(Parser *self)
     {
         type_specifer_matched = 1;
         combinable = TOKEN->type != TK_NAME;
-        NONTERMINAL(ast, parser_type_specifer(self));
+        REQUIRED(ast, parser_type_specifer(self));
     }
     else if (parser_is_type_qualifier(self))
-        NONTERMINAL(ast, parser_type_qualifier(self));
+        REQUIRED(ast, parser_type_qualifier(self));
     AST *p = ast;
     while (parser_is_type_specifer(self) || parser_is_type_qualifier(self))
     {
@@ -919,10 +956,10 @@ AST *parser_specifier_qualifier_list(Parser *self)
                 break;
             type_specifer_matched = 1;
             combinable = TOKEN->type != TK_NAME;
-            NONTERMINAL(p->sibling, parser_type_specifer(self));
+            REQUIRED(p->sibling, parser_type_specifer(self));
         }
         else if (parser_is_type_qualifier(self))
-            NONTERMINAL(p->sibling, parser_type_qualifier(self));
+            REQUIRED(p->sibling, parser_type_qualifier(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -938,12 +975,12 @@ AST *parser_struct_declarator_list(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_struct_declarator(self));
+    REQUIRED(ast, parser_struct_declarator(self));
     AST *p = ast;
     while (TOKEN->type == TK_COMMA)
     {
         MATCH(TK_COMMA);
-        NONTERMINAL(p->sibling, parser_struct_declarator(self));
+        REQUIRED(p->sibling, parser_struct_declarator(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -960,13 +997,13 @@ AST *parser_struct_declarator(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_STRUCTDECLARATOR, context);
+    NEWAST(ast, AK_RECORDDECLARATOR, context);
     if (TOKEN->type != TK_COLON)
-        NONTERMINAL(ast->structdeclor_declor, parser_declarator(self));
+        REQUIRED(ast->recorddeclor_declor, parser_declarator(self));
     if (TOKEN->type == TK_COLON)
     {
         MATCH(TK_COLON);
-        NONTERMINAL(ast->structdeclor_const, parser_constant_expression(self));
+        REQUIRED(ast->recorddeclor_bit, parser_constant_expression(self));
     }
     UPDATECONTEXT(ast->context);
     return ast;
@@ -982,7 +1019,7 @@ AST *parser_enum_specifier(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_ENUMSPECIFIER, context);
+    NEWAST(ast, AK_ENUMDECL, context);
     MATCH(TK_ENUM);
     if (TOKEN->type == TK_NAME)
     {
@@ -992,7 +1029,7 @@ AST *parser_enum_specifier(Parser *self)
     if (TOKEN->type == TK_LBRACE)
     {
         MATCH(TK_LBRACE);
-        NONTERMINAL(ast->enum_enumor, parser_enumerator_list(self));
+        REQUIRED(ast->enum_consts, parser_enumerator_list(self));
         MATCH(TK_RBRACE);
     }
     UPDATECONTEXT(ast->context);
@@ -1008,12 +1045,12 @@ AST *parser_enumerator_list(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_enumerator(self));
+    REQUIRED(ast, parser_enumerator(self));
     AST *p = ast;
     while (TOKEN->type == TK_COMMA)
     {
         MATCH(TK_COMMA);
-        NONTERMINAL(p->sibling, parser_enumerator(self));
+        REQUIRED(p->sibling, parser_enumerator(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -1033,13 +1070,13 @@ AST *parser_enumerator(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_ENUMERATOR, context);
+    NEWAST(ast, AK_ENUMCONSTDECL, context);
     ast->val = TOKEN->str;
     MATCH(TK_NAME);
     if (TOKEN->type == TK_EQUAL)
     {
         MATCH(TK_EQUAL);
-        NONTERMINAL(ast->enumor_const, parser_constant_expression(self));
+        REQUIRED(ast->enumconst_val, parser_constant_expression(self));
     }
     UPDATECONTEXT(ast->context);
     return ast;
@@ -1055,7 +1092,7 @@ AST *parser_type_qualifier(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_TYPEQUALIFIER, context);
+    NEWAST(ast, AK_TYPEQUALIFIER, context);
     ast->val = TOKEN->str;
     MATCH(TOKEN->type);
     return ast;
@@ -1075,8 +1112,8 @@ AST *parser_parameter_declaration(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_PARAMDECLARATION, context);
-    NONTERMINAL(ast->decl_spec, parser_declaration_specifier(self));
+    NEWAST(ast, AK_PARAMDECLARATION, context);
+    REQUIRED(ast->decl_spec, parser_declaration_specifier(self));
 
     STORE(tk2);
     ast->decl_declor = parser_declarator(self);
@@ -1085,6 +1122,7 @@ AST *parser_parameter_declaration(Parser *self)
         LOAD(tk2);
         ast->decl_declor = parser_abstract_declarator(self);
         if (ast->decl_declor == NULL) LOAD(tk2);
+        self->error_num = _tk2;
     }
     UPDATECONTEXT(ast->context);
     return ast;
@@ -1098,11 +1136,11 @@ AST *parser_declarator(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    if (parser_is_pointer(self)) NONTERMINAL(ast, parser_pointer(self));
+    if (parser_is_pointer(self)) REQUIRED(ast, parser_pointer(self));
     if (ast != NULL)
-        NONTERMINAL(ast->pdeclor_sub, parser_direct_declarator(self));
+        REQUIRED(ast->pdeclor_sub, parser_direct_declarator(self));
     else
-        NONTERMINAL(ast, parser_direct_declarator(self));
+        REQUIRED(ast, parser_direct_declarator(self));
     UPDATECONTEXT(ast->context);
     return ast;
 }
@@ -1118,15 +1156,16 @@ AST *parser_abstract_declarator(Parser *self)
     AST *ast = NULL;
     if (parser_is_pointer(self))
     {
-        NONTERMINAL(ast, parser_pointer(self));
+        REQUIRED(ast, parser_pointer(self));
         STORE(tk);
         AST *t = NULL;
         t = parser_direct_abstract_delarator(self);
         if (t == NULL) LOAD(tk);
+        self->error_num = _tk;
         ast->pdeclor_sub = t;
     }
     else
-        NONTERMINAL(ast, parser_direct_abstract_delarator(self));
+        REQUIRED(ast, parser_direct_abstract_delarator(self));
     UPDATECONTEXT(ast->context);
     return ast;
 }
@@ -1146,14 +1185,14 @@ AST *parser_direct_declarator(Parser *self)
     AST *ast;
     if (TOKEN->type == TK_NAME)
     {
-        NEWAST(ast, AT_NAME, context);
+        NEWAST(ast, AK_DECLNAME, context);
         ast->val = TOKEN->str;
         MATCH(TK_NAME);
     }
     else if (TOKEN->type == TK_LPAREN)
     {
         MATCH(TK_LPAREN);
-        NONTERMINAL(ast, parser_declarator(self));
+        REQUIRED(ast, parser_declarator(self));
         MATCH(TK_RPAREN);
     }
     else
@@ -1164,22 +1203,20 @@ AST *parser_direct_declarator(Parser *self)
         if (TOKEN->type == TK_LSQUARE)
         {
             MATCH(TK_LSQUARE);
-            NEWAST(t, AT_ARRAYDECLARATOR, ast->context);
+            NEWAST(t, AK_ARRAYDECLARATOR, ast->context);
             t->arraydeclor_sub = ast;
             if (TOKEN->type != TK_RSQUARE)
-                NONTERMINAL(t->arraydeclor_len,
-                            parser_constant_expression(self));
+                REQUIRED(t->arraydeclor_len, parser_constant_expression(self));
             MATCH(TK_RSQUARE);
         }
         else if (TOKEN->type == TK_LPAREN)
         {
             // 这里与文法描述不符 [identifier_list]
             MATCH(TK_LPAREN);
-            NEWAST(t, AT_FUNCTIONDECLARATOR, ast->context);
+            NEWAST(t, AK_FUNCTIONDECLARATOR, ast->context);
             t->funcdeclor_sub = ast;
             if (TOKEN->type != TK_RPAREN)
-                NONTERMINAL(t->funcdeclor_param,
-                            parser_parameter_type_list(self));
+                REQUIRED(t->funcdeclor_param, parser_parameter_type_list(self));
             MATCH(TK_RPAREN);
         }
         UPDATECONTEXT(t->context);
@@ -1198,15 +1235,15 @@ AST *parser_direct_abstract_delarator(Parser *self)
 {
     STORE(tk);
     NEWCONTEXT(context);
-    AST *ast;
+    AST *ast = NULL;
     if (TOKEN->type == TK_LPAREN)
     {
         MATCH(TK_LPAREN);
         if (parser_is_pointer(self) || TOKEN->type == TK_LSQUARE
             || TOKEN->type == TK_LPAREN)
-            NONTERMINAL(ast, parser_abstract_declarator(self));
+            REQUIRED(ast, parser_abstract_declarator(self));
         else // 不等价
-            NEWAST(ast, AT_FUNCTIONDECLARATOR, context);
+            NEWAST(ast, AK_FUNCTIONDECLARATOR, context);
         MATCH(TK_RPAREN);
     }
     while (TOKEN->type == TK_LSQUARE || TOKEN->type == TK_LPAREN)
@@ -1215,21 +1252,19 @@ AST *parser_direct_abstract_delarator(Parser *self)
         if (TOKEN->type == TK_LSQUARE)
         {
             MATCH(TK_LSQUARE);
-            NEWAST(t, AT_ARRAYDECLARATOR, ast->context);
+            NEWAST(t, AK_ARRAYDECLARATOR, ast->context);
             t->arraydeclor_sub = ast;
             if (TOKEN->type != TK_RSQUARE)
-                NONTERMINAL(t->arraydeclor_len,
-                            parser_constant_expression(self));
+                REQUIRED(t->arraydeclor_len, parser_constant_expression(self));
             MATCH(TK_RSQUARE);
         }
         else if (TOKEN->type == TK_LPAREN)
         {
             MATCH(TK_LPAREN);
-            NEWAST(t, AT_FUNCTIONDECLARATOR, ast->context);
+            NEWAST(t, AK_FUNCTIONDECLARATOR, ast->context);
             t->funcdeclor_sub = ast;
             if (TOKEN->type != TK_RPAREN)
-                NONTERMINAL(t->funcdeclor_param,
-                            parser_parameter_type_list(self));
+                REQUIRED(t->funcdeclor_param, parser_parameter_type_list(self));
             MATCH(TK_RPAREN);
         }
         UPDATECONTEXT(t->context);
@@ -1248,12 +1283,12 @@ AST *parser_pointer(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_POINTERDECLARATOR, context);
+    NEWAST(ast, AK_POINTERDECLARATOR, context);
     MATCH(TK_STAR);
     if (parser_is_type_qualifier_list(self))
-        NONTERMINAL(ast->pdeclor_qualifier, parser_type_qualifier_list(self));
+        REQUIRED(ast->pdeclor_qualifier, parser_type_qualifier_list(self));
     if (parser_is_pointer(self))
-        NONTERMINAL(ast->pdeclor_sub, parser_pointer(self));
+        REQUIRED(ast->pdeclor_sub, parser_pointer(self));
     UPDATECONTEXT(ast->context);
     return ast;
 }
@@ -1268,11 +1303,11 @@ AST *parser_type_qualifier_list(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_type_qualifier(self));
+    REQUIRED(ast, parser_type_qualifier(self));
     AST *p = ast;
     while (parser_is_type_qualifier(self))
     {
-        NONTERMINAL(p->sibling, parser_type_qualifier(self));
+        REQUIRED(p->sibling, parser_type_qualifier(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -1292,7 +1327,7 @@ AST *parser_parameter_type_list(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_parameter_list(self));
+    REQUIRED(ast, parser_parameter_list(self));
     return ast;
 }
 
@@ -1305,7 +1340,7 @@ AST *parser_parameter_list(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_parameter_declaration(self));
+    REQUIRED(ast, parser_parameter_declaration(self));
     AST *p = ast;
     while (TOKEN->type == TK_COMMA)
     {
@@ -1313,11 +1348,11 @@ AST *parser_parameter_list(Parser *self)
         NEWCONTEXT(context);
         if (TOKEN->type == TK_ELLIPSIS)
         {
-            NEWAST(p->sibling, AT_VARPARAM, context);
+            NEWAST(p->sibling, AK_VARPARAM, context);
             MATCH(TK_ELLIPSIS);
         }
         else
-            NONTERMINAL(p->sibling, parser_parameter_declaration(self));
+            REQUIRED(p->sibling, parser_parameter_declaration(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -1333,12 +1368,16 @@ AST *parser_type_name(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_TYPENAME, context);
-    NONTERMINAL(ast->typename_specqual, parser_specifier_qualifier_list(self));
+    NEWAST(ast, AK_TYPENAME, context);
+    REQUIRED(ast->typename_specqual, parser_specifier_qualifier_list(self));
 
     STORE(tk2);
     ast->typename_declor = parser_abstract_declarator(self);
-    if (ast->typename_declor == NULL) LOAD(tk2);
+    if (ast->typename_declor == NULL)
+    {
+        LOAD(tk2);
+        self->error_num = _tk2;
+    }
     UPDATECONTEXT(ast->context);
     return ast;
 }
@@ -1356,14 +1395,14 @@ AST *parser_initializer(Parser *self)
     AST *ast;
     if (TOKEN->type == TK_LBRACE)
     {
-        NEWAST(ast, AT_INITLIST, context);
+        NEWAST(ast, AK_INITLIST, context);
         MATCH(TK_LBRACE);
-        NONTERMINAL(ast->initlist_list, parser_initializer_list(self));
+        REQUIRED(ast->initlist_list, parser_initializer_list(self));
         UPDATECONTEXT(ast->context);
         MATCH(TK_RBRACE);
     }
     else
-        NONTERMINAL(ast, parser_assignment_expression(self));
+        REQUIRED(ast, parser_assignment_expression(self));
     return ast;
 }
 
@@ -1376,13 +1415,13 @@ AST *parser_initializer_list(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_initializer(self));
+    REQUIRED(ast, parser_initializer(self));
     AST *p = ast;
     while (1)
     {
         MATCH(TK_COMMA);
         if (TOKEN->type == TK_RBRACE) break;
-        NONTERMINAL(p->sibling, parser_initializer(self));
+        REQUIRED(p->sibling, parser_initializer(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -1403,19 +1442,42 @@ AST *parser_statement(Parser *self)
 {
     AST *ast = NULL;
     STORE(tk);
-    if ((ast = parser_labeled_statement(self)) != NULL) return ast;
+    if ((ast = parser_labeled_statement(self)) != NULL)
+    {
+        self->error_num = _tk;
+        return ast;
+    }
     LOAD(tk);
     if (TOKEN->type == TK_LBRACE
         && (ast = parser_compound_statement(self)) != NULL)
+    {
+        self->error_num = _tk;
         return ast;
+    }
     LOAD(tk);
-    if ((ast = parser_expression_statement(self)) != NULL) return ast;
+    if ((ast = parser_expression_statement(self)) != NULL)
+    {
+        self->error_num = _tk;
+        return ast;
+    }
     LOAD(tk);
-    if ((ast = parser_selection_statement(self)) != NULL) return ast;
+    if ((ast = parser_selection_statement(self)) != NULL)
+    {
+        self->error_num = _tk;
+        return ast;
+    }
     LOAD(tk);
-    if ((ast = parser_iteration_statement(self)) != NULL) return ast;
+    if ((ast = parser_iteration_statement(self)) != NULL)
+    {
+        self->error_num = _tk;
+        return ast;
+    }
     LOAD(tk);
-    if ((ast = parser_jump_statement(self)) != NULL) return ast;
+    if ((ast = parser_jump_statement(self)) != NULL)
+    {
+        self->error_num = _tk;
+        return ast;
+    }
     LOAD(tk);
     return NULL;
 }
@@ -1434,24 +1496,49 @@ AST *parser_labeled_statement(Parser *self)
     switch (TOKEN->type)
     {
     case TK_NAME:
-        NEWAST(ast, AT_LABEL, context);
+        NEWAST(ast, AK_LABEL, context);
         MATCH(TK_NAME);
         MATCH(TK_COLON);
-        NONTERMINAL(ast->label_stmt, parser_statement(self));
+        {
+            STORE(tk);
+            ast->label_stmt = parser_statement(self);
+            if (ast->label_stmt == NULL)
+            {
+                LOAD(tk);
+                self->error_num = _tk;
+            }
+        }
         UPDATECONTEXT(ast->context);
         break;
     case TK_CASE:
-        NEWAST(ast, AT_CASE, context);
+        NEWAST(ast, AK_CASE, context);
         MATCH(TK_CASE);
-        NONTERMINAL(ast->case_expr, parser_constant_expression(self));
+        REQUIRED(ast->case_expr, parser_constant_expression(self));
         MATCH(TK_COLON);
-        NONTERMINAL(ast->case_stmt, parser_statement(self));
+        {
+            STORE(tk);
+            ast->case_stmt = parser_statement(self);
+            if (ast->case_stmt == NULL)
+            {
+                LOAD(tk);
+                self->error_num = _tk;
+            }
+        }
         UPDATECONTEXT(ast->context);
         break;
     case TK_DEFAULT:
-        NEWAST(ast, AT_DEFAULT, context);
+        NEWAST(ast, AK_DEFAULT, context);
+        MATCH(TK_DEFAULT);
         MATCH(TK_COLON);
-        NONTERMINAL(ast->default_stmt, parser_statement(self));
+        {
+            STORE(tk);
+            ast->default_stmt = parser_statement(self);
+            if (ast->default_stmt == NULL)
+            {
+                LOAD(tk);
+                self->error_num = _tk;
+            }
+        }
         UPDATECONTEXT(context);
         break;
     }
@@ -1476,18 +1563,19 @@ AST *parser_compound_statement(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_COMPOUND, context);
+    NEWAST(ast, AK_COMPOUND, context);
     MATCH(TK_LBRACE);
     AST *p = ast->compound_stmt;
     while (TOKEN->type != TK_RBRACE)
     {
         AST *t;
         STORE(tk);
-        t = parser_declaration(self);
+        t = parser_statement(self);
         if (t == NULL)
         {
             LOAD(tk);
-            NONTERMINAL(t, parser_statement(self));
+            REQUIRED(t, parser_declaration(self));
+            self->error_num = _tk;
         }
         if (p == NULL)
             ast->compound_stmt = p = t;
@@ -1516,11 +1604,11 @@ AST *parser_declaration_list(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    NONTERMINAL(ast, parser_declaration(self));
+    REQUIRED(ast, parser_declaration(self));
     AST *p = ast;
     while (parser_is_declaration(self))
     {
-        NONTERMINAL(p->sibling, parser_declaration(self));
+        REQUIRED(p->sibling, parser_declaration(self));
         p = p->sibling;
         p->head_sibling = ast;
     }
@@ -1537,9 +1625,9 @@ AST *parser_expression_statement(Parser *self)
     NEWCONTEXT(context);
     AST *ast;
     if (TOKEN->type != TK_SEMI)
-        NONTERMINAL(ast, parser_expression(self));
+        REQUIRED(ast, parser_expression(self));
     else
-        NEWAST(ast, AT_NULLSTMT, context);
+        NEWAST(ast, AK_NULLSTMT, context);
     MATCH(TK_SEMI);
     return ast;
 }
@@ -1558,28 +1646,27 @@ AST *parser_selection_statement(Parser *self)
     switch (TOKEN->type)
     {
     case TK_IF:
-        NEWAST(ast, AT_IF, context);
+        NEWAST(ast, AK_IF, context);
         MATCH(TK_IF);
         MATCH(TK_LPAREN);
-        NONTERMINAL(ast->if_cond, parser_expression(self));
+        REQUIRED(ast->if_cond, parser_expression(self));
         MATCH(TK_RPAREN);
-        NONTERMINAL(ast->if_body, parser_statement(self));
+        REQUIRED(ast->if_body, parser_statement(self));
         if (TOKEN->type == TK_ELSE)
         {
             MATCH(TK_ELSE);
-            NONTERMINAL(ast->if_else, parser_statement(self));
+            REQUIRED(ast->if_else, parser_statement(self));
         }
         UPDATECONTEXT(ast->context);
         break;
     case TK_SWITCH:
-        NEWAST(ast, AT_SWITCH, context);
+        NEWAST(ast, AK_SWITCH, context);
         MATCH(TK_SWITCH);
         MATCH(TK_LPAREN);
-        NONTERMINAL(ast->switch_expr, parser_expression(self));
+        REQUIRED(ast->switch_expr, parser_expression(self));
         MATCH(TK_RPAREN);
-        NONTERMINAL(ast->switch_body, parser_statement(self));
+        REQUIRED(ast->switch_body, parser_statement(self));
         UPDATECONTEXT(ast->context);
-        MATCH(TK_SEMI);
         break;
     }
     return ast;
@@ -1590,6 +1677,7 @@ iteration_statement:
     while(expression) statement
     | do statement while(expression) ;
     | for([expression] ; [expression] ; [expression]) statement
+    | for(declaration [expression]; [expression]) statement
 */
 AST *parser_iteration_statement(Parser *self)
 {
@@ -1599,40 +1687,53 @@ AST *parser_iteration_statement(Parser *self)
     switch (TOKEN->type)
     {
     case TK_WHILE:
-        NEWAST(ast, AT_WHILE, context);
+        NEWAST(ast, AK_WHILE, context);
         MATCH(TK_WHILE);
         MATCH(TK_LPAREN);
-        NONTERMINAL(ast->while_cond, parser_expression(self));
+        REQUIRED(ast->while_cond, parser_expression(self));
         MATCH(TK_RPAREN);
-        NONTERMINAL(ast->while_body, parser_statement(self));
+        REQUIRED(ast->while_body, parser_statement(self));
         UPDATECONTEXT(ast->context);
         break;
     case TK_DO:
-        NEWAST(ast, AT_DOWHILE, context);
+        NEWAST(ast, AK_DOWHILE, context);
         MATCH(TK_DO);
-        NONTERMINAL(ast->dowhile_body, parser_statement(self));
+        REQUIRED(ast->dowhile_body, parser_statement(self));
+        MATCH(TK_WHILE);
         MATCH(TK_LPAREN);
-        NONTERMINAL(ast->dowhile_cond, parser_expression(self));
+        REQUIRED(ast->dowhile_cond, parser_expression(self));
         MATCH(TK_RPAREN);
         UPDATECONTEXT(ast->context);
         MATCH(TK_SEMI);
         break;
     case TK_FOR:
-        NEWAST(ast, AT_FOR, context);
+        NEWAST(ast, AK_FOR, context);
         MATCH(TK_FOR);
         MATCH(TK_LPAREN);
 
         if (TOKEN->type != TK_SEMI)
-            NONTERMINAL(ast->for_init, parser_expression(self));
-        MATCH(TK_SEMI);
+        {
+            STORE(tk2);
+            ast->for_init = parser_expression(self);
+            if (ast->for_init == NULL)
+            {
+                LOAD(tk2);
+                REQUIRED(ast->for_init, parser_declaration(self));
+                self->error_num = _tk2;
+            }
+            else
+                MATCH(TK_SEMI);
+        }
+        else
+            MATCH(TK_SEMI);
         if (TOKEN->type != TK_SEMI)
-            NONTERMINAL(ast->for_cond, parser_expression(self));
+            REQUIRED(ast->for_cond, parser_expression(self));
         MATCH(TK_SEMI);
         if (TOKEN->type != TK_RPAREN)
-            NONTERMINAL(ast->for_iter, parser_expression(self));
+            REQUIRED(ast->for_iter, parser_expression(self));
 
         MATCH(TK_RPAREN);
-        NONTERMINAL(ast->for_body, parser_statement(self));
+        REQUIRED(ast->for_body, parser_statement(self));
         UPDATECONTEXT(ast->context);
         break;
     }
@@ -1654,7 +1755,7 @@ AST *parser_jump_statement(Parser *self)
     switch (TOKEN->type)
     {
     case TK_GOTO:
-        NEWAST(ast, AT_GOTO, context);
+        NEWAST(ast, AK_GOTO, context);
         MATCH(TK_GOTO);
         ast->val = TOKEN->str;
         MATCH(TK_NAME);
@@ -1662,18 +1763,20 @@ AST *parser_jump_statement(Parser *self)
         MATCH(TK_SEMI);
         break;
     case TK_CONTINUE:
-        NEWAST(ast, AT_CONTINUE, context);
+        NEWAST(ast, AK_CONTINUE, context);
+        MATCH(TK_CONTINUE);
         MATCH(TK_SEMI);
         break;
     case TK_BREAK:
-        NEWAST(ast, AT_BREAK, context);
+        NEWAST(ast, AK_BREAK, context);
+        MATCH(TK_BREAK);
         MATCH(TK_SEMI);
         break;
     case TK_RETURN:
-        NEWAST(ast, AT_RETURN, context);
+        NEWAST(ast, AK_RETURN, context);
         MATCH(TK_RETURN);
         if (TOKEN->type != TK_SEMI)
-            NONTERMINAL(ast->return_val, parser_expression(self));
+            REQUIRED(ast->return_val, parser_expression(self));
         UPDATECONTEXT(ast->context);
         MATCH(TK_SEMI);
         break;
@@ -1708,9 +1811,17 @@ AST *parser_external_declaration(Parser *self)
 {
     STORE(tk);
     AST *ast = NULL;
-    if ((ast = parser_functionn_definition(self)) != NULL) return ast;
+    if ((ast = parser_functionn_definition(self)) != NULL)
+    {
+        self->error_num = _tk;
+        return ast;
+    }
     LOAD(tk);
-    if ((ast = parser_declarator(self)) != NULL) return ast;
+    if ((ast = parser_declaration(self)) != NULL)
+    {
+        self->error_num = _tk;
+        return ast;
+    }
     LOAD(tk);
     return ast;
 }
@@ -1724,12 +1835,16 @@ AST *parser_functionn_definition(Parser *self)
     STORE(tk);
     NEWCONTEXT(context);
     AST *ast = NULL;
-    NEWAST(ast, AT_FUNCTIONDEF, context);
+    NEWAST(ast, AK_FUNCTIONDEF, context);
     STORE(tk2);
     ast->funcdef_spec = parser_declaration_specifier(self);
-    if (ast->funcdef_spec == NULL) LOAD(tk2);
-    NONTERMINAL(ast->funcdef_declor, parser_declarator(self));
-    NONTERMINAL(ast->funcdef_body, parser_compound_statement(self));
+    if (ast->funcdef_spec == NULL)
+    {
+        LOAD(tk2);
+        self->error_num = _tk2;
+    }
+    REQUIRED(ast->funcdef_declor, parser_declarator(self));
+    REQUIRED(ast->funcdef_body, parser_compound_statement(self));
     UPDATECONTEXT(ast->context);
     return ast;
 }
@@ -1738,7 +1853,7 @@ AST *parser_start(Parser *self)
 {
     NEWCONTEXT(context);
     AST *ast;
-    NEWAST(ast, AT_TRANSLATIONUNIT, context);
+    NEWAST(ast, AK_TRANSLATIONUNIT, context);
     ast->tu_body = parser_translation_unit(self);
     return ast;
 }
