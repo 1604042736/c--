@@ -1,5 +1,5 @@
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "stringutil.h"
@@ -38,35 +38,16 @@ char *repr(char *s)
     {
         switch (*s)
         {
-        case '"':
-            p = add_string(p, "\\\"");
-            break;
-        case '\\':
-            p = add_string(p, "\\\\");
-            break;
-        case '\a':
-            p = add_string(p, "\\a");
-            break;
-        case '\b':
-            p = add_string(p, "\\b");
-            break;
-        case '\f':
-            p = add_string(p, "\\f");
-            break;
-        case '\n':
-            p = add_string(p, "\\n");
-            break;
-        case '\r':
-            p = add_string(p, "\\r");
-            break;
-        case 't':
-            p = add_string(p, "\\t");
-            break;
-        case 'v':
-            p = add_string(p, "\\b");
-            break;
-        default:
-            p = add_char(p, *s);
+        case '"': p = add_string(p, "\\\""); break;
+        case '\\': p = add_string(p, "\\\\"); break;
+        case '\a': p = add_string(p, "\\a"); break;
+        case '\b': p = add_string(p, "\\b"); break;
+        case '\f': p = add_string(p, "\\f"); break;
+        case '\n': p = add_string(p, "\\n"); break;
+        case '\r': p = add_string(p, "\\r"); break;
+        case '\t': p = add_string(p, "\\t"); break;
+        case '\v': p = add_string(p, "\\b"); break;
+        default: p = add_char(p, *s);
         }
         s++;
     }
@@ -90,4 +71,16 @@ char *path_join(char *p1, char *p2)
     s = add_char(s, '/');
     s = add_string(s, p2);
     return s;
+}
+
+unsigned long long string_hash(char *s)
+{
+    unsigned long long hash = 0;
+    unsigned long long seed = 17;
+    while (*s != '\0')
+    {
+        hash = hash * seed + *s;
+        s++;
+    }
+    return hash;
 }
