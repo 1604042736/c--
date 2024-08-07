@@ -118,7 +118,7 @@ void declanalyzer_analyze(DeclAnalyzer *self, AST *ast)
     if (ast == NULL) return;
     AST *p, *t;
     char buf[100];
-    Type *_type;
+    Type *_type, *type_;
     char *_name;
     int _flag;
     switch (ast->kind)
@@ -164,6 +164,9 @@ void declanalyzer_analyze(DeclAnalyzer *self, AST *ast)
             }
             if (self->type->kind == T_TYPEDEF) self->type->name = ast->val;
             self->type->flag = self->flag;
+            //这两个flag只影响当前类型
+            REMOVE_FLAG(self->flag, TF_CONST);
+            REMOVE_FLAG(self->flag, TF_VOLATILE);
         }
         break;
     case AK_TYPEQUALIFIER:
@@ -172,7 +175,10 @@ void declanalyzer_analyze(DeclAnalyzer *self, AST *ast)
         else if (!strcmp(ast->val, "volatile"))
             CHANGE_FLAG(TF_VOLATILE, ADD_FLAG);
         break;
-    case AK_DECLNAME: self->name = ast->val; break;
+    case AK_DECLNAME:
+        self->name = ast->val;
+        declanalyzer_analyze_child(self, ast);
+        break;
     case AK_POINTERDECLARATOR: {
         Type *type = type_new();
         type_init(type, T_POINTER);
@@ -180,6 +186,10 @@ void declanalyzer_analyze(DeclAnalyzer *self, AST *ast)
         type->t.pointee_type = self->type;
         self->type = type;
         declanalyzer_analyze_brother(self, ast->pdeclor_qualifier);
+
+        REMOVE_FLAG(self->flag, TF_CONST);
+        REMOVE_FLAG(self->flag, TF_VOLATILE);
+
         declanalyzer_analyze_brother(self, ast->pdeclor_sub);
         break;
     }
@@ -289,14 +299,16 @@ void declanalyzer_analyze(DeclAnalyzer *self, AST *ast)
         self->type->name = ast->val;
         break;
     case AK_RECORDSPECIFIER:
+        SAVE;
         p = ast_new();
         ast_init(p, AK_RECORDDECL, ast->context);
         p->flag = ast->flag;
         ast->recordspec_decl = p;
 
+        CLEAR;
         t = ast->recordspec_list;
         declanalyzer_analyze(self, t);
-        _type = self->type;
+        type_ = self->type;
         t = t->decl_declor;
         p = p->recorddecl_field;
         while (t != NULL)
@@ -318,15 +330,18 @@ void declanalyzer_analyze(DeclAnalyzer *self, AST *ast)
                 p->head_sibling = ast->recordspec_decl->recorddecl_field;
             }
 
-            self->type = _type;
+            CLEAR;
+            self->type = type_;
             t = t->sibling;
         }
 
+        RESTORE;
         self->type = type_new();
         if (CHECK_FLAG(ast->flag, AF_STRUCT))
             type_init(self->type, T_STRUCT);
         else
             type_init(self->type, T_UNION);
+        self->type->flag = self->flag;
         if (ast->val[0] == '\0')
         {
             self->type->name = empty_string();
@@ -350,7 +365,7 @@ void declanalyzer_analyze(DeclAnalyzer *self, AST *ast)
         }
         assert(ast->decl_declor->kind == AK_INITDECLARATOR);
 
-        _type = self->type; //保存类型说明
+        type_ = self->type; //保存类型说明
         p = ast->decl_declor;
         t = ast->decl_decls;
         while (p != NULL)
@@ -393,7 +408,8 @@ void declanalyzer_analyze(DeclAnalyzer *self, AST *ast)
                 t->head_sibling = ast->decl_decls;
             }
             p = p->sibling;
-            self->type = _type;
+            CLEAR;
+            self->type = type_;
         }
         RESTORE;
         break;

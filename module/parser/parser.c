@@ -1138,7 +1138,13 @@ AST *parser_declarator(Parser *self)
     AST *ast = NULL;
     if (parser_is_pointer(self)) REQUIRED(ast, parser_pointer(self));
     if (ast != NULL)
-        REQUIRED(ast->pdeclor_sub, parser_direct_declarator(self));
+    {
+        AST *t;
+        REQUIRED(t, parser_direct_declarator(self));
+        AST *p = ast;
+        while (p->declor_sub != NULL) p = p->declor_sub;
+        p->declor_sub = t;
+    }
     else
         REQUIRED(ast, parser_direct_declarator(self));
     UPDATECONTEXT(ast->context);
@@ -1160,9 +1166,15 @@ AST *parser_abstract_declarator(Parser *self)
         STORE(tk);
         AST *t = NULL;
         t = parser_direct_abstract_delarator(self);
-        if (t == NULL) LOAD(tk);
         self->error_num = _tk;
-        ast->pdeclor_sub = t;
+        if (t == NULL)
+            LOAD(tk);
+        else
+        {
+            AST *p = ast;
+            while (p->declor_sub != NULL) p = p->declor_sub;
+            p->declor_sub = t;
+        }
     }
     else
         REQUIRED(ast, parser_direct_abstract_delarator(self));
@@ -1288,7 +1300,12 @@ AST *parser_pointer(Parser *self)
     if (parser_is_type_qualifier_list(self))
         REQUIRED(ast->pdeclor_qualifier, parser_type_qualifier_list(self));
     if (parser_is_pointer(self))
-        REQUIRED(ast->pdeclor_sub, parser_pointer(self));
+    {
+        AST *t;
+        REQUIRED(t, parser_pointer(self));
+        t->pdeclor_sub = ast;
+        ast = t;
+    }
     UPDATECONTEXT(ast->context);
     return ast;
 }

@@ -39,8 +39,8 @@ extern "C" {
 #define arraydeclor_len child[1]
 #define funcdeclor_sub declor_sub
 #define funcdeclor_param child[1]
-#define pdeclor_sub child[1]
-#define pdeclor_qualifier child[0]
+#define pdeclor_sub declor_sub
+#define pdeclor_qualifier child[1]
 #define typename_specqual child[0]
 #define typename_declor child[1]
 #define return_val child[0]
