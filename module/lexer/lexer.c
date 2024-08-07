@@ -1,152 +1,122 @@
-#include <stdlib.h>
 #include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
 
-#include "lexer.h"
-#include "warning.h"
-#include "stringutil.h"
+#include "assert.h"
+#include "ast.h"
 #include "error.h"
+#include "lexer.h"
+#include "stringutil.h"
+#include "warning.h"
 
-Lexer *lexer_new()
-{
-    return (Lexer *)malloc(sizeof(Lexer));
-}
+Lexer *lexer_new() { return (Lexer *)malloc(sizeof(Lexer)); }
 
 void lexer_init(Lexer *self, FILE *file, char *filename)
 {
     filecontext_init(&self->context, file, filename, 1, 0);
-    self->token = NULL;
-    self->token_head = NULL;
-    self->lines = NULL;
+    self->token = self->token_head = NULL;
+    self->flag = 0;
+    self->line = NULL;
     self->pp = preprocessor_new();
     preprocessor_init(self->pp);
-    self->eof = 0; // file==NULL的情况是给预处理器专门使用的
-    self->ignore_pp = 0;
-    self->ignore_space = 1;
-    self->merge_row = 0;
+    ADD_FLAG(self->flag, LF_SKIPSPACE);
+    ADD_FLAG(self->flag, LF_SKIPCOMMENT);
+    ADD_FLAG(self->flag, LF_CONCAT);
 }
 
-Line *line_new()
-{
-    return (Line *)malloc(sizeof(Line));
-}
+#define NEW_LINE (Line *)malloc(sizeof(Line))
 
-void line_init(Line *self, Lexer *lexer)
+void lexer_init_line(Lexer *self, Line *line)
 {
-    self->pre = self->next = NULL;
-    memset(self->buf, '\0', sizeof(self->buf));
-    if (lexer->context.file != NULL)
-        fgets(self->buf, BUF_SIZE, lexer->context.file);
-    else
-        lexer->eof = 1;
-    self->pos = 0;
+    line->pos = 0;
+    line->pre = line->next = NULL;
+    line->buf = empty_string();
+    char c;
+    do
+    {
+        c = fgetc(self->context.file);
+        line->buf = add_char(line->buf, c);
+    } while (c != '\n' && c != EOF);
 }
 
 void lexer_getch(Lexer *self)
 {
-    if (self->lines == NULL)
+    if (self->line == NULL)
     {
-        self->lines = line_new();
-        line_init(self->lines, self);
-        self->context.line = self->lines->buf;
+        self->line = NEW_LINE;
+        lexer_init_line(self, self->line);
     }
-    while (self->lines->pos >= strlen(self->lines->buf))
+    if (self->line->pos >= strlen(self->line->buf))
     {
-        if (feof(self->context.file) || self->context.file == NULL)
+        if (CHECK_FLAG(self->flag, LF_EOF))
         {
             self->ch = EOF;
-            self->eof = 1;
             return;
         }
-        if (self->lines->pos > 0 && self->lines->buf[self->lines->pos - 1] == '\n') // 有可能出现一行没读完的情况
+        if (self->line->next == NULL)
         {
-            self->context.row++;
-            if (!self->merge_row)
-                self->context.l_row++;
-            else
-                self->merge_row = 0;
-            self->context.col = 0;
+            Line *new_line = NEW_LINE;
+            lexer_init_line(self, new_line);
+            self->line->next = new_line;
+            new_line->pre = self->line;
         }
-        if (self->lines->next != NULL)
-            self->lines = self->lines->next;
+        self->line = self->line->next;
+        self->context.row++;
+        self->context.col = 0;
+        if (CHECK_FLAG(self->flag, LF_MERGEROW))
+            REMOVE_FLAG(self->flag, LF_MERGEROW);
         else
-        {
-            Line *new_line = line_new();
-            line_init(new_line, self);
-            new_line->pre = self->lines;
-            self->lines->next = new_line;
-            self->lines = self->lines->next;
-        }
-        self->context.line = self->lines->buf;
+            self->context.l_row++;
     }
     self->context.col++;
-    self->ch = self->lines->buf[self->lines->pos++];
-    if (self->ch == '\\')
+    self->ch = self->line->buf[self->line->pos++];
+    if (self->ch == EOF)
+        ADD_FLAG(self->flag, LF_EOF);
+    else if (self->ch == '\\')
     {
-        int n = strlen(self->lines->buf) - self->lines->pos;
-        char *s = (char *)malloc(n + 1);
-        strncpy(s, self->lines->buf + self->lines->pos, n);
-        s[n] = '\0';
-        if (!strcmp(s, "\n") || !strcmp(s, "\r\r"))
+        if (self->line->pos >= strlen(self->line->buf)
+            || self->line->buf[self->line->pos] == '\n')
         {
-            self->merge_row = 1;                         // 合并这两行
-            self->lines->pos = strlen(self->lines->buf); // 强制结束这一行
+            ADD_FLAG(self->flag, LF_MERGEROW);
+            self->line->pos = strlen(self->line->buf); //强制结束这一行
             lexer_getch(self);
         }
-        free(s);
     }
 }
 
 void lexer_ungetch(Lexer *self)
 {
-    if (self->eof)
-        return;
-    self->context.col--;
-    if (self->lines->pos == 0)
+    if (self->line->pos <= 0) //回到上一行
     {
-        if (self->lines->pre != NULL)
-            self->lines = self->lines->pre;
-        self->lines->pos = strlen(self->lines->buf) - 1;
-        self->context.col = self->lines->pos + 1;
-        self->context.line = self->lines->buf;
-        if (self->lines->buf[self->lines->pos] == '\n') // 有可能出现一行没有读完的情况
-        {
-            self->context.row--;
-            self->context.l_row--;
-        }
+        self->line = self->line->pre;
+        self->line->pos = strlen(self->line->buf) - 1;
+        self->context.row--;
+        self->context.l_row--;
+        self->context.col = self->line->pos;
     }
     else
-        self->lines->pos--;
-    self->ch = self->lines->buf[self->lines->pos];
+    {
+        self->line->pos--;
+        self->context.col--;
+    }
 }
 
 char lexer_get_escape(Lexer *self, char c)
 {
     switch (c)
     {
-    case '\'':
-        return '\'';
-    case '"':
-        return '"';
-    case '\\':
-        return '\\';
-    case 'a':
-        return '\a';
-    case 'b':
-        return '\b';
-    case 'f':
-        return '\f';
-    case 'n':
-        return '\n';
-    case 'r':
-        return '\r';
-    case 't':
-        return '\t';
-    case 'v':
-        return '\v';
-    case '0':
-        return '\0';
+    case '\'': return '\'';
+    case '"': return '"';
+    case '\\': return '\\';
+    case 'a': return '\a';
+    case 'b': return '\b';
+    case 'f': return '\f';
+    case 'n': return '\n';
+    case 'r': return '\r';
+    case 't': return '\t';
+    case 'v': return '\v';
+    case '0': return '\0';
     default:
         warning(self->context, "unknown escape sequence '\\%c'\n", c);
         return c;
@@ -155,84 +125,30 @@ char lexer_get_escape(Lexer *self, char c)
 
 void lexer_gettoken(Lexer *self)
 {
-#define TOKEN(type, str) token_init(self->token, type, context, str)
+#define TOKEN(t, s) token_init(self->token, t, context, s)
+start:
+    Token *pre = NULL;
+    if (self->token != NULL) pre = self->token->pre;
     if (self->token != NULL && self->token->next != NULL)
     {
+        pre = self->token;
         self->token = self->token->next;
-        goto process;
+        goto token_got;
     }
-    Token *pre = self->token;
+    pre = self->token;
     self->token = token_new();
     lexer_getch(self);
-    if (self->ignore_space)
-    {
-        while (isspace(self->ch) && self->ch != EOF)
-            lexer_getch(self);
-    }
     FileContext context = self->context;
-    if (self->ch == EOF)
-        TOKEN(TK_END, "<eof>");
-    else if (isalpha(self->ch) || self->ch == '_')
+    switch (self->ch)
     {
-        char *str = empty_string();
-        str = add_char(str, self->ch);
-        lexer_getch(self);
-        while (isalpha(self->ch) || isdigit(self->ch) || self->ch == '_')
-        {
-            str = add_char(str, self->ch);
-            lexer_getch(self);
-        }
-        lexer_ungetch(self);
-        TokenType type = TK_NAME;
-        for (int i = 0; i < KEYWORD_NUM; i++)
-        {
-            if (!strcmp(keyword_type_names[i].name, str))
-            {
-                type = keyword_type_names[i].type;
-                break;
-            }
-        }
-        TOKEN(type, str);
-    }
-    else if (isdigit(self->ch))
-    {
-        TokenType type = TK_INTCONST;
-        char *str = empty_string();
-        str = add_char(str, self->ch);
-        lexer_getch(self);
-        while (isdigit(self->ch))
-        {
-            str = add_char(str, self->ch);
-            lexer_getch(self);
-        }
-        if (self->ch == '.')
-        {
-            str = add_char(str, self->ch);
-            lexer_getch(self);
-            while (isdigit(self->ch))
-            {
-                str = add_char(str, self->ch);
-                lexer_getch(self);
-            }
-            type = TK_FLOATCONST;
-        }
-        lexer_ungetch(self);
-        TOKEN(type, str);
-    }
-    else if (self->ch == '[')
-        TOKEN(TK_LSQUARE, "[");
-    else if (self->ch == ']')
-        TOKEN(TK_RSQUARE, "]");
-    else if (self->ch == '(')
-        TOKEN(TK_LPAREN, "(");
-    else if (self->ch == ')')
-        TOKEN(TK_RPAREN, ")");
-    else if (self->ch == '{')
-        TOKEN(TK_LBRACE, "{");
-    else if (self->ch == '}')
-        TOKEN(TK_RBRACE, "}");
-    else if (self->ch == '.')
-    {
+    case EOF: TOKEN(TK_END, "<eof>"); goto token_got;
+    case '[': TOKEN(TK_LSQUARE, "["); goto token_got;
+    case ']': TOKEN(TK_RSQUARE, "]"); goto token_got;
+    case '(': TOKEN(TK_LPAREN, "("); goto token_got;
+    case ')': TOKEN(TK_RPAREN, ")"); goto token_got;
+    case '{': TOKEN(TK_LBRACE, "{"); goto token_got;
+    case '}': TOKEN(TK_RBRACE, "}"); goto token_got;
+    case '.': {
         lexer_getch(self);
         if (self->ch == '.')
         {
@@ -250,9 +166,9 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_PERIOD, ".");
         }
+        goto token_got;
     }
-    else if (self->ch == '&')
-    {
+    case '&': {
         lexer_getch(self);
         if (self->ch == '&')
             TOKEN(TK_AMPAMP, "&&");
@@ -263,9 +179,9 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_AMP, "&");
         }
+        goto token_got;
     }
-    else if (self->ch == '*')
-    {
+    case '*': {
         lexer_getch(self);
         if (self->ch == '=')
             TOKEN(TK_STAREQUAL, "*=");
@@ -274,9 +190,9 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_STAR, "*");
         }
+        goto token_got;
     }
-    else if (self->ch == '+')
-    {
+    case '+': {
         lexer_getch(self);
         if (self->ch == '+')
             TOKEN(TK_PLUSPLUS, "++");
@@ -287,9 +203,9 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_PLUS, "+");
         }
+        goto token_got;
     }
-    else if (self->ch == '-')
-    {
+    case '-': {
         lexer_getch(self);
         if (self->ch == '-')
             TOKEN(TK_MINUSMINUS, "--");
@@ -302,11 +218,10 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_MINUS, "-");
         }
+        goto token_got;
     }
-    else if (self->ch == '~')
-        TOKEN(TK_TILDE, "~");
-    else if (self->ch == '!')
-    {
+    case '~': TOKEN(TK_TILDE, "~"); goto token_got;
+    case '!': {
         lexer_getch(self);
         if (self->ch == '=')
             TOKEN(TK_EXCLAIMEQUAL, "!=");
@@ -315,9 +230,9 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_EXCLAIM, "!");
         }
+        goto token_got;
     }
-    else if (self->ch == '/')
-    {
+    case '/': {
         lexer_getch(self);
         if (self->ch == '=')
             TOKEN(TK_SLASHEQUAL, "/=");
@@ -329,6 +244,13 @@ void lexer_gettoken(Lexer *self)
             {
                 str = add_char(str, self->ch);
                 lexer_getch(self);
+            }
+            if (CHECK_FLAG(self->flag, LF_SKIPCOMMENT))
+            {
+                free(self->token);
+                self->token = pre;
+                lexer_gettoken(self);
+                return;
             }
             TOKEN(TK_COMMENT, str);
         }
@@ -355,6 +277,13 @@ void lexer_gettoken(Lexer *self)
             }
             if (self->ch == EOF)
                 warning(self->context, "unterminated /* comment");
+            if (CHECK_FLAG(self->flag, LF_SKIPCOMMENT))
+            {
+                free(self->token);
+                self->token = pre;
+                lexer_gettoken(self);
+                return;
+            }
             TOKEN(TK_COMMENT, str);
         }
         else
@@ -362,9 +291,9 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_SLASH, "/");
         }
+        goto token_got;
     }
-    else if (self->ch == '%')
-    {
+    case '%': {
         lexer_getch(self);
         if (self->ch == '=')
             TOKEN(TK_PERCENTEQUAL, "%=");
@@ -373,31 +302,45 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_PERCENT, "%");
         }
+        goto token_got;
     }
-    else if (self->ch == '<')
-    {
-        lexer_getch(self);
-        if (self->ch == '<')
+    case '<': {
+        if (!CHECK_FLAG(self->flag, LF_PPMODE))
         {
             lexer_getch(self);
-            if (self->ch == '=')
-                TOKEN(TK_LESSLESSEQUAL, "<<=");
+            if (self->ch == '<')
+            {
+                lexer_getch(self);
+                if (self->ch == '=')
+                    TOKEN(TK_LESSLESSEQUAL, "<<=");
+                else
+                {
+                    lexer_ungetch(self);
+                    TOKEN(TK_LESSLESS, "<<");
+                }
+            }
+            else if (self->ch == '=')
+                TOKEN(TK_LESSEQUAL, "<=");
             else
             {
                 lexer_ungetch(self);
-                TOKEN(TK_LESSLESS, "<<");
+                TOKEN(TK_LESS, "<");
             }
         }
-        else if (self->ch == '=')
-            TOKEN(TK_LESSEQUAL, "<=");
         else
         {
-            lexer_ungetch(self);
-            TOKEN(TK_LESS, "<");
+            char *str = empty_string();
+            lexer_getch(self);
+            do
+            {
+                str = add_char(str, self->ch);
+                lexer_getch(self);
+            } while (self->ch != '>');
+            TOKEN(TK_HEADERNAME, str);
         }
+        goto token_got;
     }
-    else if (self->ch == '>')
-    {
+    case '>': {
         lexer_getch(self);
         if (self->ch == '>')
         {
@@ -417,9 +360,9 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_GREATER, ">");
         }
+        goto token_got;
     }
-    else if (self->ch == '^')
-    {
+    case '^': {
         lexer_getch(self);
         if (self->ch == '=')
             TOKEN(TK_CARETEQUAL, "^=");
@@ -428,9 +371,9 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_CARET, "^");
         }
+        goto token_got;
     }
-    else if (self->ch == '|')
-    {
+    case '|': {
         lexer_getch(self);
         if (self->ch == '=')
             TOKEN(TK_PIPEEQUAL, "|=");
@@ -441,15 +384,12 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_PIPE, "|");
         }
+        goto token_got;
     }
-    else if (self->ch == '?')
-        TOKEN(TK_QUESTION, "?");
-    else if (self->ch == ':')
-        TOKEN(TK_COLON, ":");
-    else if (self->ch == ';')
-        TOKEN(TK_SEMI, ";");
-    else if (self->ch == '=')
-    {
+    case '?': TOKEN(TK_QUESTION, "?"); goto token_got;
+    case ':': TOKEN(TK_COLON, ":"); goto token_got;
+    case ';': TOKEN(TK_SEMI, ";"); goto token_got;
+    case '=': {
         lexer_getch(self);
         if (self->ch == '=')
             TOKEN(TK_EQUALEQUAL, "==");
@@ -458,11 +398,10 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_EQUAL, "=");
         }
+        goto token_got;
     }
-    else if (self->ch == ',')
-        TOKEN(TK_COMMA, ",");
-    else if (self->ch == '\'')
-    {
+    case ',': TOKEN(TK_COMMA, ","); goto token_got;
+    case '\'': {
         char *str = (char *)malloc(sizeof(char) * 2);
         lexer_getch(self);
         if (self->ch == '\\')
@@ -480,9 +419,9 @@ void lexer_gettoken(Lexer *self)
             warning(self->context, "missing terminating ' character");
         }
         TOKEN(TK_CHARCONST, str);
+        goto token_got;
     }
-    else if (self->ch == '"')
-    {
+    case '"': {
         char *str = empty_string();
         lexer_getch(self);
         while (self->ch != '"' && self->ch != EOF)
@@ -499,9 +438,9 @@ void lexer_gettoken(Lexer *self)
         if (self->ch == EOF)
             warning(self->context, "missing terminating '\"' character");
         TOKEN(TK_STRINGCONST, str);
+        goto token_got;
     }
-    else if (self->ch == '#')
-    {
+    case '#': {
         lexer_getch(self);
         if (self->ch == '#')
             TOKEN(TK_HASHHASH, "##");
@@ -510,170 +449,276 @@ void lexer_gettoken(Lexer *self)
             lexer_ungetch(self);
             TOKEN(TK_HASH, "#");
         }
+        goto token_got;
+    }
+    case '\n':
+        if (CHECK_FLAG(self->flag, LF_SKIPSPACE)
+            && !CHECK_FLAG(self->flag, LF_PPMODE))
+            goto white_space;
+        TOKEN(TK_NEWLINE, "\n");
+        goto token_got;
+    }
+
+    if (isalpha(self->ch) || self->ch == '_')
+    {
+        char *str = empty_string();
+        do
+        {
+            str = add_char(str, self->ch);
+            lexer_getch(self);
+        } while (isalpha(self->ch) || isdigit(self->ch) || self->ch == '_');
+        TokenType type = TK_NAME;
+        for (int i = 0; i < KEYWORD_NUM; i++)
+        {
+            if (!strcmp(keyword_type_names[i].name, str))
+            {
+                type = keyword_type_names[i].type;
+                break;
+            }
+        }
+        TOKEN(type, str);
+        lexer_ungetch(self);
+    }
+    else if (isdigit(self->ch))
+    {
+        char *str = empty_string();
+        do
+        {
+            str = add_char(str, self->ch);
+            lexer_getch(self);
+        } while (isdigit(self->ch));
+        TokenType type = TK_INTCONST;
+        if (self->ch == '.')
+        {
+            type = TK_FLOATCONST;
+            do
+            {
+                str = add_char(str, self->ch);
+                lexer_getch(self);
+            } while (isdigit(self->ch));
+        }
+        lexer_ungetch(self);
+        TOKEN(type, str);
+    }
+    else if (isspace(self->ch))
+    {
+    white_space:
+        char *str = empty_string();
+        do
+        {
+            str = add_char(str, self->ch);
+            lexer_getch(self);
+        } while (isspace(self->ch) && self->ch != EOF);
+        lexer_ungetch(self);
+        if (CHECK_FLAG(self->flag, LF_SKIPSPACE))
+        {
+            free(str);
+            free(self->token);
+            self->token = pre;
+            lexer_gettoken(self);
+            return;
+        }
+        TOKEN(TK_SPACE, str);
     }
     else
     {
-        char *str = (char *)malloc(sizeof(char) * 2);
+        char *str = (char *)malloc(2);
         str[0] = self->ch;
         str[1] = '\0';
         TOKEN(TK_UNKNOWN, str);
     }
+
+token_got:
+
     self->token->pre = pre;
-    if (pre != NULL)
-        pre->next = self->token;
-    if (self->token_head == NULL)
-        self->token_head = self->token;
-process:
-    while (self->token->type == TK_COMMENT)
-        lexer_gettoken(self);
-    while (self->token->type == TK_HASH && !self->ignore_pp)
-        lexer_handle_directive(self);
-    Token *tk = self->token;
-    while (self->token->type == TK_NAME && !self->ignore_pp)
+    if (pre != NULL) pre->next = self->token;
+    if (self->token_head == NULL) self->token_head = self->token;
+    int _pp_pos = self->pp->cp_pos; //保存
+    if (!CHECK_FLAG(self->flag, LF_SKIPPP))
     {
-        lexer_expand_macro(self);
-        if (tk == self->token) // 没有替换
-            break;
-        tk = self->token;
+        while (self->token->type == TK_HASH) lexer_handle_directive(self);
+        Token *tk = self->token;
+        while (self->token->type == TK_NAME)
+        {
+            lexer_expand_macro(self);
+            if (tk->type == self->token->type
+                && !strcmp(tk->str, self->token->str))
+                break; //相当于没有进行替换
+            tk = self->token;
+        }
     }
-    // 连接相邻的字符串字面量
-    if (self->token->type == TK_STRINGCONST)
+    //在这里token链表中不会删除这个TK_SPACE
+    if (CHECK_FLAG(self->flag, LF_SKIPSPACE)
+        && (self->token->type == TK_SPACE
+            || !CHECK_FLAG(self->flag, LF_PPMODE)
+                   && self->token->type == TK_NEWLINE))
     {
+        lexer_gettoken(self);
+        return;
+    }
+    if (CHECK_FLAG(self->flag, LF_CONCAT)
+        && self->token->type == TK_STRINGCONST) //拼接相邻的字符串字面量
+    {
+        pre = self->token;
         lexer_gettoken(self);
         if (self->token->type == TK_STRINGCONST)
         {
-            lexer_ungettoken(self);
-            char *str = empty_string();
+            char *str = empty_string(self);
+            str = add_string(str, pre->str);
             str = add_string(str, self->token->str);
-            str = add_string(str, self->token->next->str);
-            token_init(self->token, TK_STRINGCONST, self->token->context, str);
-            self->token->next->next->pre = self->token;
-            self->token->next = self->token->next->next;
+            pre->str = str;
+
+            pre->next = self->token->next;
+            if (self->token->next != NULL) self->token->next->pre = pre;
+
+            self->token = pre;
         }
         else
             lexer_ungettoken(self);
+    }
+    if (self->pp->cr_pos != -1
+        && !CHECK_FLAG(self->flag, LF_PPMODE)) //说明正在进行条件预处理
+    {
+        if (self->pp->cr_pos
+            != _pp_pos) //说明这是条件预处理指令之后遇到的第一个token
+        {
+            Token *tk = self->token->pre;
+            lexer_gettoken(self);
+            self->token = tk->next;
+        }
+        else
+            goto start;
     }
 }
 
 void lexer_ungettoken(Lexer *self)
 {
-    if (self->token != NULL && self->token->pre != NULL)
-        self->token = self->token->pre;
+    if (self->token != NULL) self->token = self->token->pre;
 }
 
-void lexer_match(Lexer *self, TokenType actual, TokenType expected, char *format, ...)
-{
-    if (actual != expected)
-    {
-        va_list args;
-        va_start(args, format);
-        error(self->context, format, args);
-        va_end(args);
-    }
-}
+#define SAVE_FLAG int _flag = self->flag
+#define RESTORE_FLAG self->flag = _flag
+#define FOLLOWINGTOKEN                                                         \
+    do                                                                         \
+    {                                                                          \
+        SAVE_FLAG;                                                             \
+        ADD_FLAG(self->flag, LF_SKIPPP);                                       \
+        lexer_gettoken(self);                                                  \
+        RESTORE_FLAG;                                                          \
+        tail = self->token;                                                    \
+    } while (self->token->type == TK_NEWLINE)
 
-#define CONNECT_HEAD(head, end)     \
-    do                              \
-    {                               \
-        if (head != NULL)           \
-            CONNECT(head, end);     \
-        else                        \
-            self->token_head = end; \
+#define CONNECT_HEAD(head, end)                                                \
+    do                                                                         \
+    {                                                                          \
+        if (head != NULL)                                                      \
+            CONNECT(head, end);                                                \
+        else                                                                   \
+            self->token_head = end;                                            \
     } while (0)
+
 void lexer_handle_directive(Lexer *self)
 {
-    int _ignore_pp = self->ignore_pp;
-    self->ignore_pp = 1;
+    assert(self->token->type == TK_HASH);
     Token *head = self->token->pre;
-    int l_row = self->context.l_row;
-    FileContext context = self->context;
+    Token *tail = NULL;
+    SAVE_FLAG;
+    ADD_FLAG(self->flag, LF_PPMODE);
     lexer_gettoken(self);
-    if (self->context.l_row != l_row)
-        goto end;
-    if (!strcmp(self->token->str, "define")) // 不完全符合标准
+    if (!strcmp(self->token->str, "define"))
     {
         lexer_gettoken(self);
-        lexer_match(self, self->token->type, TK_NAME, "macro name must be an identitifer");
-        if (self->context.l_row != l_row)
-            error(context, "macro name missing");
-
         char *name = self->token->str;
-        lexer_gettoken(self);
+        if (self->token->type != TK_NAME)
+            error(self->token->context, "macro name must be an identifier");
         Token *parameters = NULL;
-        if (self->token->type == TK_LPAREN && self->context.l_row == l_row)
+        lexer_getch(self);
+        if (self->ch == '(')
         {
+            SAVE_FLAG;
+            ADD_FLAG(self->flag, LF_PPMODE);
             lexer_gettoken(self);
-            if (self->token->type != TK_RPAREN && self->context.l_row == l_row)
+            Token *p = NULL;
+            while (self->token->type != TK_RPAREN && self->token->type != TK_END
+                   && self->token->type != TK_NEWLINE)
             {
-                if (self->token->type != TK_NAME && self->token->type != TK_ELLIPSIS)
-                    error(self->context, "invalid token in macro parameter list");
-                parameters = token_copy(self->token);
-                parameters->pre = NULL;
-                Token *p = parameters;
-                lexer_gettoken(self);
-                while (self->token->type != TK_RPAREN && self->context.l_row == l_row)
+                if (self->token->type != TK_NAME
+                    && self->token->type != TK_ELLIPSIS)
+                    error(self->context,
+                          "invalid token in macro parameter list");
+                if (p == NULL)
+                    parameters = p = token_copy(self->token);
+                else
                 {
-                    lexer_match(self, self->token->type, TK_COMMA, "expected comma in macro parameter list");
-                    lexer_gettoken(self);
-                    if (self->token->type != TK_NAME && self->token->type != TK_ELLIPSIS)
-                        error(self->context, "invalid token in macro parameter list");
-                    if (self->context.l_row != l_row)
-                        break;
                     p->next = token_copy(self->token);
                     p->next->pre = p;
                     p = p->next;
-                    lexer_gettoken(self);
                 }
-            }
-            if (self->token->type == TK_RPAREN && self->context.l_row != l_row)
-                error(context, "missing ')' in macro parameter list");
-            if (self->context.l_row == l_row)
+                p->next = NULL;
                 lexer_gettoken(self);
+                if (!(self->token->type != TK_RPAREN
+                      && self->token->type != TK_END
+                      && self->token->type != TK_NEWLINE))
+                    break;
+                if (self->token->type != TK_COMMA)
+                    error(self->context,
+                          "expected a ',' between two parameters");
+                lexer_gettoken(self);
+            }
+            if (self->token->type != TK_RPAREN)
+                error(self->context, "missing ')' in parameter list");
+            RESTORE_FLAG;
         }
+        else
+            lexer_ungetch(self);
         Token *body = NULL;
-        if (self->context.l_row == l_row)
+        Token *p = NULL;
+
+        SAVE_FLAG;
+        ADD_FLAG(self->flag, LF_PPMODE);
+        ADD_FLAG(self->flag, LF_SKIPPP);
+        REMOVE_FLAG(self->flag, LF_SKIPSPACE);
+        lexer_gettoken(self);
+        while (self->token->type != TK_NEWLINE)
         {
-            body = token_copy(self->token);
-            Token *p = body;
-            p->pre = NULL;
-            lexer_gettoken(self);
-            while (self->context.l_row == l_row && (self->token->type != TK_UNKNOWN || self->token->str[0] != '\n'))
+            if (p == NULL)
+                body = p = token_copy(self->token);
+            else
             {
                 p->next = token_copy(self->token);
                 p->next->pre = p;
                 p = p->next;
-                lexer_gettoken(self);
             }
-            if (self->context.l_row == l_row)
-                lexer_gettoken(self);
+            p->next = NULL;
+            lexer_gettoken(self);
         }
+        if (p->type == TK_SPACE) p->pre->next = NULL;
+        if (body->type == TK_SPACE) body = body->next;
+        p = body;
+        while (p != NULL)
+        {
+            if (p->type == TK_SPACE) p->str = " ";
+            p = p->next;
+        }
+        RESTORE_FLAG;
 
         Macro *macro = macro_new();
         macro_init(macro, name, parameters, body);
-        if (self->pp->macros == NULL)
-            self->pp->macros = macro;
-        else
-        {
-            Macro *p = self->pp->macros;
-            while (p->next != NULL)
-                p = p->next;
-            p->next = macro;
-            macro->pre = p;
-        }
+        preprocessor_add_macro(self->pp, macro);
+
+        FOLLOWINGTOKEN;
     }
     else if (!strcmp(self->token->str, "undef"))
     {
         lexer_gettoken(self);
-        lexer_match(self, self->token->type, TK_NAME, "macro name must be an identitifer");
-        if (self->context.l_row != l_row)
-            error(context, "macro name missing");
+        if (self->token->type != TK_NAME)
+            error(self->context, "macro name must be an identitifer");
         Macro *p = self->pp->macros;
         while (p != NULL)
         {
             if (!strcmp(p->name, self->token->str))
             {
-                if (p->next != NULL)
-                    p->next->pre = p->pre;
+                if (p->next != NULL) p->next->pre = p->pre;
                 if (p->pre != NULL)
                     p->pre->next = p->next;
                 else
@@ -682,58 +727,44 @@ void lexer_handle_directive(Lexer *self)
             }
             p = p->next;
         }
-        lexer_gettoken(self);
+        FOLLOWINGTOKEN;
     }
     else if (!strcmp(self->token->str, "include"))
     {
         lexer_gettoken(self);
         char *filename;
         int include_std;
-        if (self->token->type == TK_STRINGCONST && self->context.l_row == l_row)
+        if (self->token->type == TK_STRINGCONST)
         {
             include_std = 0;
             filename = self->token->str;
         }
-        else if (self->token->type == TK_LESS && self->context.l_row == l_row)
+        else if (self->token->type == TK_HEADERNAME)
         {
             include_std = 1;
-            filename = empty_string();
-            lexer_gettoken(self);
-            int _ignore_space = self->ignore_space;
-            self->ignore_space = 0;
-
-            while (self->token->type != TK_GREATER && self->context.l_row == l_row)
-            {
-                filename = add_string(filename, self->token->str);
-                lexer_gettoken(self);
-            }
-            if (self->context.l_row != l_row)
-                error(context, "expected \"FILENAME\" or <FILENAME>");
-
-            self->ignore_space = _ignore_space;
+            filename = self->token->str;
         }
         else
-            error(self->context.l_row == l_row ? self->context : context, "expected \"FILENAME\" or <FILENAME>");
+            error(self->context, "expected \"FILENAME\" or <FILENAME>");
         lexer_include(self, filename, include_std);
     }
     else if (!strcmp(self->token->str, "if"))
     {
         error(self->context, "incomplete");
     }
-    else if (!strcmp(self->token->str, "ifdef") || !strcmp(self->token->str, "ifndef"))
+    else if (!strcmp(self->token->str, "ifdef")
+             || !strcmp(self->token->str, "ifndef"))
     {
         int reverse = !strcmp(self->token->str, "ifndef");
         lexer_gettoken(self);
-        lexer_match(self, self->token->type, TK_NAME, "macro name must be an identitifer");
-        if (self->context.l_row != l_row)
-            error(context, "macro name missing");
+        if (self->token->type != TK_NAME)
+            error(self->context, "macro name must be an identitifer");
         Macro *macro = preprocessor_find_macro(self->pp, self->token->str);
         int result = macro != NULL;
-        if (reverse)
-            result = !result;
+        if (reverse) result = !result;
         self->pp->condi_result[++self->pp->cr_pos] = result;
         self->pp->condi_pre[++self->pp->cp_pos] = head;
-        lexer_gettoken(self);
+        FOLLOWINGTOKEN;
     }
     else if (!strcmp(self->token->str, "else"))
     {
@@ -746,19 +777,19 @@ void lexer_handle_directive(Lexer *self)
         else
             self->pp->condi_result[self->pp->cr_pos] = 0;
         self->pp->condi_pre[self->pp->cp_pos] = head;
-        lexer_gettoken(self);
+        FOLLOWINGTOKEN;
     }
     else if (!strcmp(self->token->str, "elif"))
     {
         error(self->context, "incomplete");
     }
-    else if (!strcmp(self->token->str, "elifdef") || !strcmp(self->token->str, "elifndef"))
+    else if (!strcmp(self->token->str, "elifdef")
+             || !strcmp(self->token->str, "elifndef"))
     {
         int reverse = !strcmp(self->token->str, "elifndef");
         lexer_gettoken(self);
-        lexer_match(self, self->token->type, TK_NAME, "macro name must be an identitifer");
-        if (self->context.l_row != l_row)
-            error(context, "macro name missing");
+        if (self->token->type != TK_NAME)
+            error(self->context, "macro name must be an identitifer");
         if (self->pp->condi_result[self->pp->cr_pos] == 0) // 上一个条件结果为0
         {
             head = self->pp->condi_pre[self->pp->cp_pos];
@@ -767,19 +798,17 @@ void lexer_handle_directive(Lexer *self)
             // 只有在上一个条件不成立的情况下才会进行判断
             Macro *macro = preprocessor_find_macro(self->pp, self->token->str);
             int result = macro != NULL;
-            if (reverse)
-                result = !result;
+            if (reverse) result = !result;
             self->pp->condi_result[self->pp->cr_pos] = result;
         }
         else
             self->pp->condi_result[self->pp->cr_pos] = 0;
         self->pp->condi_pre[self->pp->cp_pos] = head;
-        lexer_gettoken(self);
+        FOLLOWINGTOKEN;
     }
     else if (!strcmp(self->token->str, "endif"))
     {
-        if (self->pp->cr_pos < 0)
-            error(self->context, "#endif without #if");
+        if (self->pp->cr_pos < 0) error(self->context, "#endif without #if");
         if (self->pp->condi_result[self->pp->cr_pos] == 0)
         {
             head = self->pp->condi_pre[self->pp->cp_pos];
@@ -787,45 +816,49 @@ void lexer_handle_directive(Lexer *self)
         }
         self->pp->cr_pos--;
         self->pp->cp_pos--;
-        lexer_gettoken(self);
+        FOLLOWINGTOKEN;
     }
     else if (!strcmp(self->token->str, "line"))
     {
         lexer_gettoken(self);
-        lexer_match(self, self->token->type, TK_INTCONST, "#line directive requires a positive integer argument");
+        if (self->token->type != TK_INTCONST)
+            error(self->context,
+                  "#line directive requires a positive integer argument");
         int new_line = atoi(self->token->str);
-        if (new_line < 0 || self->token->context.l_row != l_row)
-            error(new_line < 0 ? self->context : context, "#line directive requires a positive integer argument");
+        if (new_line < 0)
+            error(self->context,
+                  "#line directive requires a positive integer argument");
         self->context.row = new_line;
         lexer_gettoken(self);
-        if (self->token->type == TK_STRINGCONST && self->token->context.l_row == l_row)
+        if (self->token->type == TK_STRINGCONST)
         {
             self->context.filename = self->token->str;
-            lexer_gettoken(self);
+            FOLLOWINGTOKEN;
         }
+        else
+            tail = self->token;
     }
     else if (!strcmp(self->token->str, "embed"))
     {
         error(self->context, "incomplete");
     }
-    else if (!strcmp(self->token->str, "warning") || !strcmp(self->token->str, "error"))
+    else if (!strcmp(self->token->str, "warning")
+             || !strcmp(self->token->str, "error"))
     {
         int is_error = !strcmp(self->token->str, "error");
         FileContext context = self->context;
         char *msg = empty_string();
 
         lexer_gettoken(self);
-        int _ignore_space = self->ignore_space;
-        self->ignore_space = 0;
-        while (self->context.l_row == l_row && (self->token->type != TK_UNKNOWN || self->token->str[0] != '\n'))
+        SAVE_FLAG;
+        REMOVE_FLAG(self->flag, LF_SKIPSPACE);
+        while (self->token->type != TK_NEWLINE && self->token->type != TK_END)
         {
             msg = add_string(msg, self->token->str);
             lexer_gettoken(self);
         }
-        self->ignore_space = _ignore_space;
-        if (self->context.l_row == l_row)
-            lexer_gettoken(self);
-
+        RESTORE_FLAG;
+        FOLLOWINGTOKEN;
         if (is_error)
             error(context, msg);
         else
@@ -836,205 +869,175 @@ void lexer_handle_directive(Lexer *self)
         error(self->context, "incomplete");
     }
     else
-        error(self->context, "invalid preprocessor directive: %s", self->token->str);
-end:
-    self->ignore_pp = _ignore_pp;
-    // 此时self->token应该是预处理指令的最后一个token的后一个token
-    CONNECT_HEAD(head, self->token);
+        error(self->context, "invalid preprocessing directive");
+    RESTORE_FLAG;
+    //移除预处理指令的token序列
+    if (head == NULL)
+    {
+        self->token_head = tail;
+        tail->pre = NULL;
+    }
+    else
+        CONNECT(head, tail);
+    self->token = tail;
 }
 
-/*
-调用该函数时保证self->token->type==TK_NAME
-同时self->token不一定是token链的最后一个
-*/
 void lexer_expand_macro(Lexer *self)
 {
-    static int expanding = 0; // 正在展开宏的数量
-    static Token *tk = NULL;  // 第一个展开宏的前一个token
-    if (!strcmp(self->token->str, "__LINE__"))
-    {
-        self->token->type = TK_INTCONST;
-        self->token->str = (char *)malloc(11);
-        self->token->str = itoa(self->context.row, self->token->str, 10);
-        return;
-    }
-    if (!strcmp(self->token->str, "__FILE__"))
-    {
-        self->token->type = TK_STRINGCONST;
-        self->token->str = self->context.filename;
-        return;
-    }
     Macro *macro = self->pp->macros;
     while (macro != NULL)
     {
-        if (!strcmp(self->token->str, macro->name))
+        Token *head = self->token->pre;
+        Token *tk = self->token;
+        if (strcmp(macro->name, self->token->str)) goto next_macro;
+        MacroArg *macroarg = NULL;
+        int arg_num = 0;
+        lexer_gettoken(self);
+        if (macro->parameters != NULL)
         {
-            Token *head = self->token, *tail; // 与宏展开有关的token链首尾两个(不包括tail)
-            if (++expanding == 1)
-                tk = head->pre;
-            int arg_num = 0;
-            MacroArg *macroarg = NULL;
-            lexer_gettoken(self);
-            if (self->token->type == TK_LPAREN)
+            if (self->token->type != TK_LPAREN) goto next_macro;
+            macroarg = lexer_get_macro_args(self, macro, &arg_num);
+            if (macroarg == NULL) goto next_macro; //参数不匹配
+            lexer_gettoken(self); //之前的self->token应该是TK_RPAREN
+        }
+        Token *tail =
+            self->token; //此时的self->token应该是替换序列的后一个token
+
+        Token *h = NULL;
+        Token *p = h;
+        Token *b = macro->body;
+        while (b != NULL)
+        {
+            Token *t = token_copy(b);
+            if (t->type == TK_NAME)
             {
-                if ((macroarg = lexer_get_macro_args(self, macro, &arg_num)) == NULL) // 参数不匹配
-                {
-                    macro = macro->next;
-                    lexer_ungettoken(self);
-                    continue;
-                }
-                lexer_gettoken(self); // lexer_get_macro_args运行完后self->token->type==TK_RPAREN
+                Token *k = macroarg_find(macroarg, t->str, arg_num);
+                if (k != NULL)
+                    t = token_copy(k);
+                else
+                    t->next = NULL;
             }
-            tail = self->token;
-            // 单方面断开与宏展开有关的token链与原token链
-            tail->pre = NULL;
-            head->pre->next = NULL;
-
-            Token *p = head->pre;
-            Token *r = macro->body;
-            while (r != NULL) // 该循环与self无关
+            else if (t->type == TK_HASH && t->next != NULL
+                     && t->next->type == TK_NAME)
             {
-                Token *t = r;
-                if (t->type == TK_NAME)
+                Token *k = macroarg_find(macroarg, t->next->str, arg_num);
+                char *str = empty_string();
+                if (k != NULL)
                 {
-                    Token *q;
-                    q = macroarg_find(macroarg, t->str, arg_num);
-                    if (q != NULL)
-                        t = token_copy(q);
-                    else if (t->type == TK_NAME && !strcmp(t->str, "__VA_ARGS__"))
+                    while (k != NULL)
                     {
-                        r = r->next;
-                        continue;
+                        str = add_string(str, k->str);
+                        k = k->next;
                     }
-                }
-                else if (t->type == TK_HASH)
-                {
-                    Token *q;
-                    if (t->next == NULL || t->next->type != TK_NAME || (q = macroarg_find(macroarg, t->next->str, arg_num)) == NULL)
-                        error(self->context, "'#' is not followed by a macro parameter");
-                    r = r->next;
-                    char *str = empty_string();
-                    while (q != NULL)
-                    {
-                        str = add_string(str, (q->type == TK_STRINGCONST ? repr(q->str) : q->str));
-                        q = q->next;
-                    }
-                    t = token_new();
-                    token_init(t, TK_STRINGCONST, r->context, str);
-                }
-                else if (t->type == TK_HASHHASH)
-                {
-                    if (t->next == NULL)
-                        error(self->context, "'##' cannot appear at end of macro expansion");
-                    r = r->next;
-                    Token *a = p;
-                    Token *b = t->next;
-                    if (b->type == TK_NAME)
-                    {
-                        Token *q;
-                        q = macroarg_find(macroarg, b->str, arg_num);
-                        if (q != NULL)
-                            b = token_copy(q);
-                        else if (b->type == TK_NAME && !strcmp(b->str, "__VA_ARGS__")) // 忽略空的__VA_ARGS__的拼接
-                        {
-                            r = r->next;
-                            continue;
-                        }
-                    }
-                    char *code = empty_string();
-                    code = add_string(code, a->str);
-                    while (b != NULL)
-                    {
-                        code = add_string(code, b->type == TK_STRINGCONST ? repr(b->str) : b->str);
-                        b = b->next;
-                    }
-
-                    Lexer lexer;
-                    lexer_init(&lexer, NULL, self->context.filename);
-                    lexer.ignore_space = 0; // 可能有宏嵌套
-
-                    Line line;
-                    strcpy(line.buf, code);
-                    line.pos = 0;
-                    line.pre = line.next = NULL;
-                    lexer.lines = &line;
-
-                    lexer_gettoken(&lexer);
-                    while (lexer.token->type != TK_END)
-                    {
-                        lexer.token->context.row += p->context.row - 1;
-                        lexer.token->context.col += p->context.col - 1;
-                        lexer_gettoken(&lexer);
-                    }
-                    lexer.token->pre->next = NULL;
-                    t = lexer.token_head;
-                    free(lexer.token);
-                    p = p->pre;
-                }
-                if (t == r)
-                {
-                    p->next = token_copy(t);
-                    p->next->pre = p;
-                    p->next->next = NULL;
-                    p = p->next;
                 }
                 else
+                    str = add_string(str, t->next->str);
+                t->type = TK_STRINGCONST;
+                t->next = NULL;
+                t->str = str;
+                b = b->next;
+            }
+            else if (t->type == TK_HASHHASH)
+            {
+                if (t->next == NULL)
+                    error(self->context,
+                          "'##' cannot appear at end of macro expansion");
+                Token *left = p;
+                Token *right;
+                if (t->next->type != TK_NAME
+                    || (right = macroarg_find(macroarg, t->next->str, arg_num))
+                           == NULL)
                 {
-                    while (t != NULL)
-                    {
-                        p->next = token_copy(t);
-                        p->next->pre = p;
-                        p->next->next = NULL;
-                        p = p->next;
-                        t = t->next;
-                    }
+                    right = token_copy(t->next);
+                    right->next = NULL;
                 }
 
-                r = r->next;
+                char *code = empty_string();
+                while (left != NULL)
+                {
+                    code = add_string(code, left->str);
+                    left = left->next;
+                }
+                while (right != NULL)
+                {
+                    code = add_string(code, right->str);
+                    right = right->next;
+                }
+
+                Lexer lexer;
+                lexer_init(&lexer, NULL, self->context.filename);
+                REMOVE_FLAG(lexer.flag, LF_SKIPSPACE);
+                ADD_FLAG(lexer.flag, LF_SKIPPP);
+
+                Line line;
+                line.buf = code;
+                line.pos = 0;
+                line.pre = line.next = NULL;
+                lexer.line = &line;
+
+                lexer_gettoken(&lexer);
+                while (lexer.token->type != TK_END)
+                {
+                    lexer.token->context.row += p->context.row - 1;
+                    lexer.token->context.col += p->context.col - 1;
+                    lexer_gettoken(&lexer);
+                }
+                lexer.token->pre->next = NULL;
+                t = lexer.token_head;
+                free(lexer.token);
+                p = p->pre; //移除原先的p
+                b = b->next;
             }
-            if (head->pre->next == NULL) // 说明宏没有进行替换
+            else
+                t->next = NULL;
+            if (p == NULL)
             {
-                self->token = tail;
-                self->token->pre = head->pre;
-                head->pre->next = self->token;
+                h = p = t;
+                t->pre = NULL;
             }
             else
             {
-                self->token = head->pre->next;
-                self->token->pre = head->pre;
-                p->next = tail;
-                tail->pre = p;
+                p->next = t;
+                t->pre = p;
+                p = p->next;
             }
-            if (--expanding == 0)
-            { // 去除空白token
-                p = self->token;
-                while (p != NULL)
-                {
-                    if (IS_SPACE_TOKEN(p))
-                    {
-                        p->pre->next = p->next;
-                        p->next->pre = p->pre;
-                    }
-                    p = p->next;
-                }
+            while (p->next != NULL)
+            {
+                p->next = token_copy(p->next);
+                p->next->pre = p;
+                p = p->next;
             }
-
-            free(macroarg);
+            b = b->next;
         }
+        if (p != NULL) p->next = tail;
+        if (h == NULL)
+        {
+            if (head == NULL)
+                self->token_head = tail;
+            else
+                CONNECT(head, tail);
+            self->token = tail;
+        }
+        else
+        {
+            if (head == NULL)
+                self->token_head = h;
+            else
+                CONNECT(head, h);
+            self->token = h;
+        }
+        break;
+    next_macro:
+        self->token = tk;
         macro = macro->next;
     }
 }
 
-/*
-获取宏参数
-调用该函数时保证self->token->type==TK_LPAREN
-param_num表示参数个数
-*/
 MacroArg *lexer_get_macro_args(Lexer *self, Macro *macro, int *arg_num)
 {
-    if (macro->parameters == NULL)
-        return NULL;
-    // 确定参数个数
+    assert(self->token->type == TK_LPAREN);
+    assert(macro->parameters != NULL);
+
     *arg_num = 0;
     Token *p = macro->parameters;
     while (p != NULL)
@@ -1042,102 +1045,98 @@ MacroArg *lexer_get_macro_args(Lexer *self, Macro *macro, int *arg_num)
         (*arg_num)++;
         p = p->next;
     }
-    // 初始化形参
-    MacroArg *macroarg = (MacroArg *)malloc(sizeof(MacroArg) * (*arg_num));
+
+    MacroArg *macroarg = malloc(sizeof(MacroArg) * (*arg_num));
     int i = 0;
     p = macro->parameters;
     while (p != NULL)
     {
-        macroarg[i].param = p->type != TK_ELLIPSIS ? p->str : "__VA_ARGS__";
+        if (p->type == TK_ELLIPSIS)
+        {
+            macroarg[i].param = "__VA_ARGS__";
+            macroarg[i].is_va_arg = 1;
+        }
+        else
+        {
+            macroarg[i].param = p->str;
+            macroarg[i].is_va_arg = 0;
+        }
         macroarg[i].arg = NULL;
-        macroarg[i].is_va_arg = p->type == TK_ELLIPSIS;
         i++;
         p = p->next;
     }
-    // 获取实参
+
+    SAVE_FLAG;
+    REMOVE_FLAG(self->flag, LF_SKIPSPACE);
+    ADD_FLAG(self->flag, LF_SKIPPP);
     i = 0;
     lexer_gettoken(self);
-    int _ignore_space = self->ignore_space;
-    while (self->token->type != TK_RPAREN)
+    while (self->token->type != TK_RPAREN && self->token->type != TK_END)
     {
-        self->ignore_space = 0;
-        p = token_copy(self->token);
-        p->pre = NULL;
-
-        Token *h = p;
+        int paren_match = 1;
+        //不能破坏原来的token连接关系, 因为获取参数可能会失败
+        Token *h = token_copy(self->token);
         h->next = NULL;
-        int paren_num = 1; // 用于括号匹配
+        p = h;
         lexer_gettoken(self);
         while (1)
         {
             switch (self->token->type)
             {
+            case TK_LPAREN: paren_match++; break;
             case TK_RPAREN:
-                if (--paren_num == 0)
-                    goto arg_got;
+                if (--paren_match == 0) goto arg_got;
                 break;
             case TK_COMMA:
-                if (paren_num == 1)
-                    goto arg_got;
+                if (paren_match == 1) goto arg_got;
                 break;
-            case TK_END:
-                error(self->context, "file end while getting macro args");
+            case TK_END: return NULL; //参数匹配失败
             }
-            h->next = token_copy(self->token);
-            h->next->pre = h;
-            h = h->next;
-            h->next = NULL;
+            p->next = token_copy(self->token);
+            p->next->pre = p;
+            p = p->next;
+            p->next = NULL;
             lexer_gettoken(self);
         }
     arg_got:
-        // 删除尾随空白字符
-        while (IS_SPACE_TOKEN(h))
+        //去除首尾的空白字符
+        if (p->type == TK_SPACE) p->pre->next = NULL;
+        if (h->type == TK_SPACE) h = h->next;
+        //将中间的所有空白替换成一个空格
+        p = h->next;
+        while (p != NULL)
         {
-            h->pre->next = NULL;
-            h = h->pre;
+            if (p->type == TK_SPACE) p->str = " ";
+            p = p->next;
         }
-        if (macroarg[i].is_va_arg)
+
+        if (!macroarg[i].is_va_arg)
+            macroarg[i++].arg = h;
+        else
         {
-            int first_in = 0;
             if (macroarg[i].arg == NULL)
+                macroarg[i].arg = h;
+            else
             {
-                macroarg[i].arg = p;
-                first_in = 1;
-            }
-            Token *t = macroarg[i].arg;
-            while (t->next != NULL)
-                t = t->next;
-            if (!first_in)
-            {
-                t->next = p;
-                t->next->pre = t;
-                t->next->next = NULL;
-                t = t->next;
+                p = macroarg[i].arg;
+                while (p->next != NULL) p = p->next;
+                p->next = h;
+                h->pre = p;
             }
             if (self->token->type == TK_COMMA)
             {
-                t->next = token_copy(self->token);
-                t->next->pre = t;
-                t->next->next = NULL;
+                p = macroarg[i].arg;
+                while (p->next != NULL) p = p->next;
+                p->next = token_copy(self->token);
+                p->next->pre = p;
             }
         }
-        else
-            macroarg[i++].arg = p;
-
-        if (IS_SPACE_TOKEN(self->token))
-        {
-            self->token->next->pre = self->token->pre;
-            self->token = self->token->pre;
-            self->token->next = self->token->next->next;
-        }
-        self->ignore_space = 1; // 实参从第一个非空白字符开始
-        if (self->token->type == TK_RPAREN)
-            break;
+        if (self->token->type == TK_RPAREN) break;
         lexer_gettoken(self);
     }
-    self->ignore_space = _ignore_space;
-    if (i < *arg_num && !macroarg[i].is_va_arg) // 参数个数不匹配
-        return NULL;
+    RESTORE_FLAG;
+    //参数数量不匹配
+    if (i < *arg_num && !macroarg[(*arg_num) - 1].is_va_arg) return NULL;
     return macroarg;
 }
 
@@ -1152,11 +1151,11 @@ void lexer_include(Lexer *self, char *filename, int include_std)
     {
         char *filepath;
         if (i == -1 && !include_std)
-            filepath = path_join(path_get_basename(self->context.filename), filename);
+            filepath =
+                path_join(path_get_basename(self->context.filename), filename);
         else
         {
-            if (i == -1)
-                i++;
+            if (i == -1) i++;
             filepath = path_join(self->pp->include_paths[i], filename);
         }
         FILE *file = fopen(filepath, "r");
@@ -1164,9 +1163,9 @@ void lexer_include(Lexer *self, char *filename, int include_std)
         {
             Lexer lexer;
             lexer_init(&lexer, file, filepath);
+            lexer.pp = self->pp;
             lexer_gettoken(&lexer);
-            while (lexer.token->type != TK_END)
-                lexer_gettoken(&lexer);
+            while (lexer.token->type != TK_END) lexer_gettoken(&lexer);
             lexer.token->pre->next = tail; // 去除最后的TK_END
             tail->pre = lexer.token->pre;
             self->token = lexer.token_head;

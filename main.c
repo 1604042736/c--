@@ -23,13 +23,9 @@ int main()
         /*do
         {
             lexer_gettoken(&lexer);
+            printf("%s\n", repr(lexer.token->str));
         } while (lexer.token->type != TK_END);
-        Token *p = lexer.token_head;
-        while (p != NULL)
-        {
-            printf("%s ", p->str);
-            p = p->next;
-        }
+        PRINT_TOKEN_LIST(lexer.token_head);
         return 0;*/
         parser_init(&parser, &lexer);
         AST *ast = parser_start(&parser);
