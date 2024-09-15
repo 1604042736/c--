@@ -1,0 +1,4 @@
+#define A 3
+A
+#undef A
+A

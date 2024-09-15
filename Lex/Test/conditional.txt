@@ -1,0 +1,10 @@
+#define A
+#ifndef A
+1 2
+#elifndef B
+
+#ifdef A
+3 4
+#endif
+
+#endif

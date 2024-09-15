@@ -1,0 +1,23 @@
+#define F(...) f(0 __VA_OPT__(,) __VA_ARGS__)
+#define G(X, ...) f(0, X __VA_OPT__(,) __VA_ARGS__)
+#define SDEF(sname, ...) S sname __VA_OPT__(= { __VA_ARGS__ })
+#define EMP
+F(a, b, c)
+F()
+F(EMP)
+G(a, b, c)
+G(a, )
+G(a)
+SDEF(foo)
+SDEF(bar, 1, 2)
+
+#define H2(X, Y, ...) __VA_OPT__(X ## Y,) __VA_ARGS__
+H2(a, b, c, d)
+#define H3(X, ...) #__VA_OPT__(X##X X##X)
+H3(, 0)
+#define H4(X, ...) __VA_OPT__(a X ## X) ## b
+H4(, 1)
+#define H5A(...) __VA_OPT__()/**/__VA_OPT__()
+#define H5B(X) a ## X ## b
+#define H5C(X) H5B(X)
+H5C(H5A())

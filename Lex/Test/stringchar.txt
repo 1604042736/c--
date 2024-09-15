@@ -1,0 +1,8 @@
+"1ab"
+"a\
+b\
+1"
+u"我的世界"
+U"Minecraft"
+u8"\123\"fdas"
+L"\xabc\n\t\f"
