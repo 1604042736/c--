@@ -1,8 +1,10 @@
 import sys
+import os
 
-sys.path.append("../..")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 import pytest
+
 from Basic import TokenKind, FileReader, Error
 from Lex import Preprocessor
 
@@ -10,7 +12,9 @@ from Lex import Preprocessor
 def examplestest(examples, handle=None):
     for example in examples:
         print(example["filename"], "=" * 64)
-        reader = FileReader(example["filename"])
+        reader = FileReader(
+            os.path.join(os.path.dirname(__file__), example["filename"])
+        )
         lexer = Preprocessor(reader)
         if handle != None:
             lexer = handle(lexer)
@@ -42,8 +46,8 @@ def test_stringconcat():
             "tokens": [
                 {
                     "kind": TokenKind.STRINGLITERAL,
-                    "text": '1abab1我的世界Minecraft\123"fdas\xabc\n\t\f',
-                    "size": 4,
+                    "content": '1abab1我的世界Minecraft\123"fdas\xabc\n\t\f',
+                    "prefix": "U",
                 },
                 {"kind": TokenKind.END},
             ],
@@ -61,12 +65,13 @@ def test_comment():
         {
             "filename": "comment.txt",
             "tokens": [
-                {"kind": TokenKind.STRINGLITERAL, "text": "a//b"},
+                {"kind": TokenKind.STRINGLITERAL, "content": "a//b"},
                 {"kind": TokenKind.COMMENT, "text": " */ //"},
                 {"kind": TokenKind.COMMENT, "text": "i();"},
                 {"kind": TokenKind.COMMENT, "text": " j();"},
                 {"kind": TokenKind.COMMENT, "text": "//"},
                 {"kind": TokenKind.IDENTIFIER, "text": "l"},
+                {"kind": TokenKind.SLASH},
                 {"kind": TokenKind.END},
             ],
         }
@@ -141,7 +146,7 @@ def test_define():
                 {"kind": TokenKind.IDENTIFIER, "text": "c"},
                 {"kind": TokenKind.COMMA},
                 {"kind": TokenKind.IDENTIFIER, "text": "d"},
-                {"kind": TokenKind.STRINGLITERAL, "text": ""},
+                {"kind": TokenKind.STRINGLITERAL, "content": ""},
                 {"kind": TokenKind.IDENTIFIER, "text": "a"},
                 {"kind": TokenKind.IDENTIFIER, "text": "b"},
                 {"kind": TokenKind.IDENTIFIER, "text": "ab"},
@@ -151,7 +156,7 @@ def test_define():
         {
             "filename": "define3.txt",
             "tokens": [
-                {"kind": TokenKind.STRINGLITERAL, "text": "x ## y"},
+                {"kind": TokenKind.STRINGLITERAL, "content": "x ## y"},
                 {"kind": TokenKind.END},
             ],
         },

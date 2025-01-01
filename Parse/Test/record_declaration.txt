@@ -1,0 +1,4 @@
+struct{int a,b;int c,d;} a;
+struct A{int a:3,b:4;};
+union{int a,b;int c,d;};
+union A{int a:3,b:4;} b;

@@ -1,6 +1,7 @@
 import sys
+import os
 
-sys.path.append("../..")
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 import pytest
 
@@ -10,7 +11,9 @@ from Lex import Lexer
 
 def examplestest(examples):
     for example in examples:
-        reader = FileReader(example["filename"])
+        reader = FileReader(
+            os.path.join(os.path.dirname(__file__), example["filename"])
+        )
         lexer = Lexer(reader)
         expected_exception = example.get("expected_exception", [])
         if expected_exception:
@@ -72,27 +75,27 @@ def test_stringchar():
         {
             "filename": "stringchar.txt",
             "tokens": [
-                {"kind": TokenKind.STRINGLITERAL, "text": "1ab"},
-                {"kind": TokenKind.STRINGLITERAL, "text": "ab1"},
+                {"kind": TokenKind.STRINGLITERAL, "content": "1ab"},
+                {"kind": TokenKind.STRINGLITERAL, "content": "ab1"},
                 {
                     "kind": TokenKind.STRINGLITERAL,
-                    "text": "我的世界",
-                    "size": 4,
+                    "content": "我的世界",
+                    "prefix": "u",
                 },
                 {
                     "kind": TokenKind.STRINGLITERAL,
-                    "text": "Minecraft",
-                    "size": 4,
+                    "content": "Minecraft",
+                    "prefix": "U",
                 },
                 {
                     "kind": TokenKind.STRINGLITERAL,
-                    "text": '\123"fdas',
-                    "size": 4,
+                    "content": '\123"fdas',
+                    "prefix": "u8",
                 },
                 {
                     "kind": TokenKind.STRINGLITERAL,
-                    "text": "\xabc\n\t\f",
-                    "size": 4,
+                    "content": "\xabc\n\t\f",
+                    "prefix": "L",
                 },
                 {"kind": TokenKind.END},
             ],

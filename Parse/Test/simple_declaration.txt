@@ -1,0 +1,10 @@
+int;
+int a;
+int *const *a;
+int a[5][6];
+int *a[5];
+int a=1;
+int a();
+int a(int b);
+int a(int b,int c);
+int a(int b,...);

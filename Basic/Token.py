@@ -153,6 +153,7 @@ class TokenKind(Enum):
     PIPEEQUAL = r"\|="
     QUESTION = r"\?"
     COLON = ":"
+    COLONCOLON = "::"
     SEMI = ";"
     EQUAL = "="
     EQUALEQUAL = "=="
@@ -307,6 +308,7 @@ class Token:
         "|=": TokenKind.PIPEEQUAL,
         "?": TokenKind.QUESTION,
         ":": TokenKind.COLON,
+        "::": TokenKind.COLONCOLON,
         ";": TokenKind.SEMI,
         "=": TokenKind.EQUAL,
         "==": TokenKind.EQUALEQUAL,
@@ -319,23 +321,13 @@ class Token:
         self.kind = kind
         self.location = location
         self.text = text
-        self.size = None  # 字符串中单个字符的大小(字节)
+        self.content = None  # 字符串内容
+        self.prefix = None  # 字符串前缀
         if kind in (TokenKind.CHARCONST, TokenKind.STRINGLITERAL):
-            if self.text.startswith("u8"):
-                self.size = 4  # "utf-8"
-                self.text = self.text[2:]
-            elif self.text.startswith("u"):
-                self.size = 4  # "utf-16"
-                self.text = self.text[1:]
-            elif self.text.startswith("U"):
-                self.size = 4  # "utf-32"
-                self.text = self.text[1:]
-            elif self.text.startswith("L"):
-                self.size = 4  # "wchar_t"
-                self.text = self.text[1:]
-            else:
-                self.size = 1
-            self.text = eval(self.text)
+            i = self.text.find('"' if kind == TokenKind.STRINGLITERAL else "'")
+            self.prefix = self.text[:i]
+            self.content = self.text[i:]
+            self.content = eval(self.content)
         self.ispphash = False  # 是否是预处理指令开头的'#'
 
     def __repr__(self):
@@ -344,6 +336,9 @@ class Token:
 
 class TokenGen:
     """token生成器基类"""
+
+    def curtoken(self) -> Token:
+        """获取当前token"""
 
     def next(self) -> Token:
         """获取下一个token"""

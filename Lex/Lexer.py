@@ -35,6 +35,9 @@ class Lexer(TokenGen):
     def curch(self):
         return self.hasread[self.nextindex - 1]
 
+    def curtoken(self) -> Token:
+        return self.tokens[self.nexttk_index - 1]
+
     def next(self):
         if self.nexttk_index >= len(self.tokens):
             token = self.getNewToken()

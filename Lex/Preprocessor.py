@@ -33,9 +33,6 @@ class Preprocessor(Lexer):
         self.filename = self.reader.filename  # 用于 __FILE__ 替换
         self.line_shift = 0  # 用于 __LINE__ 替换时进行调整
 
-    def curtoken(self) -> Token:
-        return self.tokens[self.nexttk_index - 1]
-
     def check_pphash(self):
         """判断当前读到的'#'是否算是预处理器指令"""
         i = self.nextindex - 2
@@ -74,13 +71,24 @@ class Preprocessor(Lexer):
             if self.replaceMacro():  # 进行了替换
                 return self.next()
 
-        while token.kind == TokenKind.STRINGLITERAL:  # 连接相邻的字符串字面量
+        # 连接相邻的字符串字面量
+        while (
+            all([i == PPState.IGNORECOMMENT for i in self.state])
+            and token.kind == TokenKind.STRINGLITERAL
+        ):
             t = self.save()
             token2 = super().next()
             if token2.kind == TokenKind.STRINGLITERAL:
-                token.text += token2.text
+                token.text += " " + token2.text
+                token.content += token2.content
                 token.location.extend(token2.location)
-                token.size = max(token.size, token2.size)
+                prefix_index = ["", "u8", "L", "u", "U"]
+                token.prefix = prefix_index[
+                    max(
+                        prefix_index.index(token.prefix),
+                        prefix_index.index(token2.prefix),
+                    )
+                ]
                 self.nexttk_index -= 1
                 self.tokens.pop(self.nexttk_index)
             else:
@@ -125,6 +133,8 @@ class Preprocessor(Lexer):
                     else None
                 )
             else:
+                # 多读了两个
+                self.ungetch()
                 self.ungetch()
         elif ch == "\n" and PPState.HANDLINGDIRECTIVE in self.state:
             return Token(TokenKind.NEWLINE, location, ch)

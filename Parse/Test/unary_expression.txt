@@ -1,0 +1,7 @@
+++a
+&a *a +a -a !a ~a
+sizeof a
+sizeof (a)
+sizeof (int)
+alignof (int)
+--a

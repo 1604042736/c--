@@ -1,10 +1,9 @@
+from typing import Union
 import colorama
 from colorama import Fore
 
 from Basic.Location import Location
 from enum import Enum
-
-colorama.init(autoreset=True)
 
 
 class DiagnosticKind(Enum):
@@ -20,19 +19,21 @@ class Diagnostic(Exception):
 
     def dump(self):
         """输出信息"""
-        print(f"{self.location}: ", end="")
         if self.kind == DiagnosticKind.ERROR:
             print(Fore.RED + "错误", end=": ")
         elif self.kind == DiagnosticKind.WARNING:
             print(Fore.YELLOW + "警告", end=": ")
         print(self.msg)
+        indent = " " * 4
         for loc in self.location:
-            lines = Location.lines[loc["filename"]]
+            filename = loc["filename"]
+            lines = Location.lines[filename]
             row = loc["lineno"] - 1
             col = loc["col"] - 1
             if row >= len(lines):
                 continue
-            prefix = f"{loc['lineno']}|"
+            prefix = indent * 2 + f"{loc['lineno']}|"
+            print(indent + f"{self.location}:")
             print(prefix, lines[row].rstrip())
             print(" " * len(prefix), " " * col + "^" * loc["span_col"])
 
@@ -40,3 +41,23 @@ class Diagnostic(Exception):
 class Error(Diagnostic):
     def __init__(self, msg: str, location: Location):
         super().__init__(msg, location, DiagnosticKind.ERROR)
+
+
+class Diagnostics(Exception):
+    def __init__(self, diagnostic_list: list[Error]):
+        self.list = diagnostic_list
+
+    def __add__(self, other: Union[list[Diagnostic], "Diagnostics"]):
+        diagnostic_list = self.list
+        if isinstance(other, Diagnostics):
+            diagnostic_list += other.list
+        else:
+            diagnostic_list += other
+        return Diagnostics(diagnostic_list)
+
+    def __bool__(self):
+        return bool(self.list)
+
+    def dump(self):
+        for diagnostic in self.list:
+            diagnostic.dump()
